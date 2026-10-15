@@ -4,6 +4,17 @@ Tools, solver code and job scripts from tuning `simpleFoam` on the 65M-cell
 occDrivAerStaticMesh case on NCI Gadi (Sapphire Rapids, `normalsr`), OpenFOAM v2512
 built with Intel oneAPI ICX 2025.3 and Intel MPI 2021.17.
 
+## Results (4 nodes × 104 ranks, 150 steps, best of 3, arms interleaved on the same nodes)
+
+| Setup | s/step | vs Basic | Cd at step 150 |
+|---|---:|---:|---|
+| Basic: ICX-SPR + Intel MPI (tuned Allreduce, scatter pinning), scotch `(4 104)/(1 0.5)`, glibc malloc tuning | 1.9765 | – | 0.28738062413153675 |
+| Bonus: Basic + `fixedIterSolvers` | 1.6684 | −15.6% | identical |
+| Bonus: + `fusedVectorSolve` | see `scripts/final` reports | | identical |
+
+Both solver changes are bit-identical to stock OpenFOAM: every solver log line, field and force
+coefficient matches.
+
 ## `tools/fixedIterSolvers` — solver plugin (main result)
 
 With fixed-iteration controls (`tolerance 0; relTol 0;` plus `maxIter`), convergence can
@@ -31,6 +42,10 @@ carries its own copy of PCG's arithmetic loops):
 FOAM_EXTRA_CXXFLAGS="-xSAPPHIRERAPIDS -fp-model=precise" wmake libso
 ```
 
+`GaussSeidelNoCopy` (same library) is a GaussSeidel smoother that avoids the per-sweep
+`bPrime = source` copy. It is bit-identical but measured **2.8% slower** (the per-face branch
+costs more than the streaming copy), so it is not used.
+
 Enable in a case:
 
 ```
@@ -39,6 +54,28 @@ libs ("<path>/libfixedIterSolvers.so");
 
 // system/fvSolution: smoothSolver -> smoothSolverFixed, coarsest-level PCG -> PCGFixed
 ```
+
+## `tools/fusedVectorSolve` — one GaussSeidel sweep for Ux, Uy, Uz
+
+OpenFOAM solves the three velocity components one after another. They are independent and share
+the matrix off-diagonals and addressing; only the boundary-corrected diagonal (different per
+component next to `slip`/`symmetry` patches), the source and the interface coefficients differ.
+This library replaces `fvMatrix<vector>::solveSegregated`: each component is set up exactly as in
+OpenFOAM (own diagonal, source, interface correction, initial residual, norm factor), then one
+GaussSeidel sweep updates all three components, reading the shared matrix once instead of three
+times. It only engages for `smoothSolver`/`smoothSolverFixed` + `GaussSeidel` with
+`tolerance 0; relTol 0;` on a 3D mesh; anything else runs a verbatim copy of the original code.
+
+`libfiniteVolume` exports the generic instantiation as a weak symbol called through the PLT, so the
+library is activated with `LD_PRELOAD` (no OpenFOAM rebuild):
+
+```bash
+mpirun ... -genv LD_PRELOAD <path>/libfusedVectorSolve.so simpleFoam -parallel
+# FUSED_VECTOR_SOLVE_REPORT=1 prints (stderr, once) whether the fused or generic path ran
+```
+
+Paired, same nodes, 10 steps, on top of `fixedIterSolvers`: −2.77% (1 node), −3.77% (4 nodes),
+bit-identical. Build with the same `FOAM_EXTRA_CXXFLAGS` as above.
 
 ## `tools/decompScore` — decomposition screening
 
