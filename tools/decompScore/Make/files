@@ -1,0 +1,3 @@
+decompScore.C
+
+EXE = /scratch/ya41/kn3896/openfoam/tools/decompScore/bin/decompScore

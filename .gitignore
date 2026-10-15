@@ -1,0 +1,11 @@
+# build products
+**/Make/linux64*/
+lnInclude/
+lib/
+bin/
+*.o
+*.dep
+# PBS job output
+*.o[0-9]*
+*.e[0-9]*
+*.OU

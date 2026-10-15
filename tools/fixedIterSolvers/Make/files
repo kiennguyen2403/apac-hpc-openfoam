@@ -1,0 +1,4 @@
+smoothSolverFixed.C
+PCGFixed.C
+
+LIB = /scratch/ya41/kn3896/openfoam/tools/fixedIterSolvers/lib/$(WM_OPTIONS)/libfixedIterSolvers
