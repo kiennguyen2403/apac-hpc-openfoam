@@ -10,9 +10,10 @@ built with Intel oneAPI ICX 2025.3 and Intel MPI 2021.17.
 |---|---:|---:|---|
 | Basic: ICX-SPR + Intel MPI (tuned Allreduce, scatter pinning), scotch `(4 104)/(1 0.5)`, glibc malloc tuning | 1.9765 | – | 0.28738062413153675 |
 | Bonus: Basic + `fixedIterSolvers` | 1.6684 | −15.6% | identical |
-| Bonus: + `fusedVectorSolve` | see `scripts/final` reports | | identical |
+| Bonus: + `fusedVectorSolve` | 1.6066 | −18.7% | identical |
 
-Both solver changes are bit-identical to stock OpenFOAM: every solver log line, field and force
+Basic and the first Bonus row ran in the same job (181332282); the last row is a separate job (181334343),
+checked against the same Cd. Both solver changes are bit-identical to stock OpenFOAM: every solver log line, field and force
 coefficient matches.
 
 ## `tools/fixedIterSolvers` — solver plugin (main result)
