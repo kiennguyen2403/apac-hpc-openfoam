@@ -203,26 +203,145 @@ Foam::fvMatrix<Foam::vector>::solveSegregated
                 );
             }
 
-            diag() = diagC[cmpt];
-
             perf[cmpt] = solverPerformance(word("smoothSolver"), fieldName);
+        }
 
-            solveScalarField Apsi(nCells);
-            solveScalarField temp(nCells);
+        // --- A*psi (lduMatrix::Amul) and the row sums for the norm factor
+        //     (lduMatrix::sumA) of all three components in one pass over the
+        //     faces. Each array receives the same operations in the same order
+        //     as in Amul/sumA; the interface contributions are added after the
+        //     internal loop, as in Amul (initMatrixInterfaces only posts the
+        //     sends of psi, it does not touch the result).
+        const lduMatrix& constMatrix = *this;
+        const label nFaces = constMatrix.upper().size();
+        const bool facePasses = !hasLowerCSR();
 
-            this->lduMatrix::Amul(Apsi, psiC[cmpt], bouC[cmpt], interfaces, cmpt);
+        FixedList<solveScalarField, 3> Apsi;
+        FixedList<solveScalarField, 3> sumA;
+        for (direction cmpt=0; cmpt<3; cmpt++)
+        {
+            Apsi[cmpt].resize(nCells);
+            sumA[cmpt].resize(nCells);
+        }
+
+        if (facePasses)
+        {
+            const scalar* const __restrict__ upperPtr = constMatrix.upper().begin();
+            const scalar* const __restrict__ lowerPtr = constMatrix.lower().begin();
+            const label* const __restrict__ uPtr = lduAddr().upperAddr().begin();
+            const label* const __restrict__ lPtr = lduAddr().lowerAddr().begin();
+
+            const solveScalar* const __restrict__ psi0 = psiC[0].begin();
+            const solveScalar* const __restrict__ psi1 = psiC[1].begin();
+            const solveScalar* const __restrict__ psi2 = psiC[2].begin();
+            const scalar* const __restrict__ d0 = diagC[0].begin();
+            const scalar* const __restrict__ d1 = diagC[1].begin();
+            const scalar* const __restrict__ d2 = diagC[2].begin();
+            solveScalar* __restrict__ A0 = Apsi[0].begin();
+            solveScalar* __restrict__ A1 = Apsi[1].begin();
+            solveScalar* __restrict__ A2 = Apsi[2].begin();
+            solveScalar* __restrict__ S0 = sumA[0].begin();
+            solveScalar* __restrict__ S1 = sumA[1].begin();
+            solveScalar* __restrict__ S2 = sumA[2].begin();
+
+            for (label cell=0; cell<nCells; cell++)
+            {
+                A0[cell] = d0[cell]*psi0[cell];
+                A1[cell] = d1[cell]*psi1[cell];
+                A2[cell] = d2[cell]*psi2[cell];
+                S0[cell] = d0[cell];
+                S1[cell] = d1[cell];
+                S2[cell] = d2[cell];
+            }
+
+            for (label face=0; face<nFaces; face++)
+            {
+                const label u = uPtr[face];
+                const label l = lPtr[face];
+
+                A0[u] += lowerPtr[face]*psi0[l];
+                A0[l] += upperPtr[face]*psi0[u];
+                A1[u] += lowerPtr[face]*psi1[l];
+                A1[l] += upperPtr[face]*psi1[u];
+                A2[u] += lowerPtr[face]*psi2[l];
+                A2[l] += upperPtr[face]*psi2[u];
+
+                S0[u] += lowerPtr[face];
+                S0[l] += upperPtr[face];
+                S1[u] += lowerPtr[face];
+                S1[l] += upperPtr[face];
+                S2[u] += lowerPtr[face];
+                S2[l] += upperPtr[face];
+            }
+
+            for (direction cmpt=0; cmpt<3; cmpt++)
+            {
+                const label startRequest = UPstream::nRequests();
+
+                initMatrixInterfaces
+                (
+                    true,
+                    bouC[cmpt],
+                    interfaces,
+                    psiC[cmpt],
+                    Apsi[cmpt],
+                    cmpt
+                );
+
+                updateMatrixInterfaces
+                (
+                    true,
+                    bouC[cmpt],
+                    interfaces,
+                    psiC[cmpt],
+                    Apsi[cmpt],
+                    cmpt,
+                    startRequest
+                );
+
+                solveScalar* __restrict__ sumAPtr = sumA[cmpt].begin();
+                forAll(interfaces, patchi)
+                {
+                    if (interfaces.set(patchi))
+                    {
+                        const labelUList& pa = lduAddr().patchAddr(patchi);
+                        const scalarField& pCoeffs = bouC[cmpt][patchi];
+
+                        forAll(pa, face)
+                        {
+                            sumAPtr[pa[face]] -= pCoeffs[face];
+                        }
+                    }
+                }
+            }
+        }
+        else
+        {
+            for (direction cmpt=0; cmpt<3; cmpt++)
+            {
+                diag() = diagC[cmpt];
+                this->lduMatrix::Amul(Apsi[cmpt], psiC[cmpt], bouC[cmpt], interfaces, cmpt);
+                this->lduMatrix::sumA(sumA[cmpt], bouC[cmpt], interfaces);
+            }
+            diag() = saveDiag;
+        }
+
+        // --- norm factor and initial residual, as smoothSolver::solve
+        for (direction cmpt=0; cmpt<3; cmpt++)
+        {
+            const word fieldName(psi.name() + pTraits<Type>::componentNames[cmpt]);
 
             // lduMatrix::solver::normFactor (DEFAULT_NORM)
-            this->lduMatrix::sumA(temp, bouC[cmpt], interfaces);
+            solveScalarField& temp = sumA[cmpt];
             temp *= gAverage(psiC[cmpt], comm);
             normFactor[cmpt] =
                 gSum
                 (
-                    (mag(Apsi - temp) + mag(sourceC[cmpt] - temp))(),
+                    (mag(Apsi[cmpt] - temp) + mag(sourceC[cmpt] - temp))(),
                     comm
                 ) + solverPerformance::small_;
 
-            solveScalarField residual(sourceC[cmpt] - Apsi);
+            solveScalarField residual(sourceC[cmpt] - Apsi[cmpt]);
 
             this->lduMatrix::setResidualField(residual, fieldName, true);
 
@@ -234,9 +353,8 @@ Foam::fvMatrix<Foam::vector>::solveSegregated
         // --- fused GaussSeidel sweeps (GaussSeidelSmoother::smooth for the
         //     three components in one pass over the matrix)
         {
-            // const access: the non-const lower() would allocate a separate
-            // lower array for a symmetric matrix
-            const lduMatrix& constMatrix = *this;
+            // const access (constMatrix): the non-const lower() would allocate
+            // a separate lower array for a symmetric matrix
             const scalar* const __restrict__ upperPtr = constMatrix.upper().begin();
             const scalar* const __restrict__ lowerPtr = constMatrix.lower().begin();
             const label* const __restrict__ uPtr = lduAddr().upperAddr().begin();
@@ -339,29 +457,104 @@ Foam::fvMatrix<Foam::vector>::solveSegregated
             }
         }
 
-        // --- final residuals, as smoothSolver::solve after the loop
-        for (direction cmpt=0; cmpt<3; cmpt++)
-        {
-            diag() = diagC[cmpt];
+        // --- final residuals (lduMatrix::residual) of all three components
+        //     in one pass over the faces; interface contributions afterwards,
+        //     as in residual
+        FixedList<solveScalarField, 3> rA;
+        for (direction cmpt=0; cmpt<3; cmpt++) rA[cmpt].resize(nCells);
 
-            solveScalarField residual
-            (
+        if (facePasses)
+        {
+            const scalar* const __restrict__ upperPtr = constMatrix.upper().begin();
+            const scalar* const __restrict__ lowerPtr = constMatrix.lower().begin();
+            const label* const __restrict__ uPtr = lduAddr().upperAddr().begin();
+            const label* const __restrict__ lPtr = lduAddr().lowerAddr().begin();
+
+            const solveScalar* const __restrict__ psi0 = psiC[0].begin();
+            const solveScalar* const __restrict__ psi1 = psiC[1].begin();
+            const solveScalar* const __restrict__ psi2 = psiC[2].begin();
+            const scalar* const __restrict__ d0 = diagC[0].begin();
+            const scalar* const __restrict__ d1 = diagC[1].begin();
+            const scalar* const __restrict__ d2 = diagC[2].begin();
+            const scalar* const __restrict__ s0 = sourceC[0].begin();
+            const scalar* const __restrict__ s1 = sourceC[1].begin();
+            const scalar* const __restrict__ s2 = sourceC[2].begin();
+            solveScalar* __restrict__ r0 = rA[0].begin();
+            solveScalar* __restrict__ r1 = rA[1].begin();
+            solveScalar* __restrict__ r2 = rA[2].begin();
+
+            for (label cell=0; cell<nCells; cell++)
+            {
+                r0[cell] = s0[cell] - d0[cell]*psi0[cell];
+                r1[cell] = s1[cell] - d1[cell]*psi1[cell];
+                r2[cell] = s2[cell] - d2[cell]*psi2[cell];
+            }
+
+            for (label face=0; face<nFaces; face++)
+            {
+                const label u = uPtr[face];
+                const label l = lPtr[face];
+
+                r0[u] -= lowerPtr[face]*psi0[l];
+                r0[l] -= upperPtr[face]*psi0[u];
+                r1[u] -= lowerPtr[face]*psi1[l];
+                r1[l] -= upperPtr[face]*psi1[u];
+                r2[u] -= lowerPtr[face]*psi2[l];
+                r2[l] -= upperPtr[face]*psi2[u];
+            }
+
+            for (direction cmpt=0; cmpt<3; cmpt++)
+            {
+                const label startRequest = UPstream::nRequests();
+
+                initMatrixInterfaces
+                (
+                    false,
+                    bouC[cmpt],
+                    interfaces,
+                    psiC[cmpt],
+                    rA[cmpt],
+                    cmpt
+                );
+
+                updateMatrixInterfaces
+                (
+                    false,
+                    bouC[cmpt],
+                    interfaces,
+                    psiC[cmpt],
+                    rA[cmpt],
+                    cmpt,
+                    startRequest
+                );
+            }
+        }
+        else
+        {
+            for (direction cmpt=0; cmpt<3; cmpt++)
+            {
+                diag() = diagC[cmpt];
                 this->lduMatrix::residual
                 (
+                    rA[cmpt],
                     psiC[cmpt],
                     sourceC[cmpt],
                     bouC[cmpt],
                     interfaces,
                     cmpt
-                )
-            );
+                );
+            }
+            diag() = saveDiag;
+        }
 
+        for (direction cmpt=0; cmpt<3; cmpt++)
+        {
             perf[cmpt].finalResidual() =
-                gSumMag(residual, comm)/normFactor[cmpt];
+                gSumMag(rA[cmpt], comm)/normFactor[cmpt];
 
             this->lduMatrix::setResidualField
             (
-                residual,
+                rA[cmpt],
                 psi.name() + pTraits<Type>::componentNames[cmpt],
                 false
             );

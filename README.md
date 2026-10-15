@@ -78,6 +78,17 @@ mpirun ... -genv LD_PRELOAD <path>/libfusedVectorSolve.so simpleFoam -parallel
 Paired, same nodes, 10 steps, on top of `fixedIterSolvers`: −2.77% (1 node), −3.77% (4 nodes),
 bit-identical. Build with the same `FOAM_EXTRA_CXXFLAGS` as above.
 
+v2 also fuses the passes around the sweeps: the three components' A·ψ and row sums (`Amul`, `sumA`,
+for the initial residual and norm factor) are computed in one pass over the faces, and so are the
+three final residuals, instead of nine separate matrix passes. Global reductions stay per component,
+so the MPI summation order is unchanged. Paired against v1 (4 nodes, 20 steps): **−1.22%**,
+bit-identical. The 1.6066 s/step final result above was measured with v1.
+
+`test/` holds the bit-identity check used for every change: `make_box_case.sh` builds a 3D box case
+with the same boundary types as occDrivAerStaticMesh (slip, symmetry, wall functions, kOmegaSST), and
+`identity_test.sh` compares stock OpenFOAM with the preloaded library, serial and on 4 ranks
+(`qsub -v WORK=<dir> identity_test.sh`).
+
 ## `tools/decompScore` — decomposition screening
 
 - `decompScore` (OpenFOAM utility): reads the mesh once, then forks one child per candidate
@@ -92,6 +103,16 @@ bit-identical. Build with the same `FOAM_EXTRA_CXXFLAGS` as above.
 Finding: per-step cost per rank tracks neighbour count; no scotch setting beat
 `domains (4 104); domainWeights (1 0.5);` for this case. Note OpenFOAM truncates
 `domainWeights` to integer ratios (`int(w/min)`), so `(1 0.4)` equals `(1 0.5)`.
+
+## Tried and rejected
+
+| Change | Result |
+|---|---|
+| `GaussSeidelNoCopy` smoother (no per-sweep source copy) | bit-identical, 2.8% slower |
+| GAMG `scaleCorrection false` for p | 6.7% faster, but Cd −0.608% at step 150 (Bonus limit ±0.5%) |
+| Single-reduction coarsest-level PCG | not built: APS showed `Allreduce` is ~89% load-imbalance wait, ~0.4% to gain |
+| KaHIP (team partition, max 37 neighbours, half the inter-node faces) | −0.36% vs scotch `(1 0.5)`, within noise |
+| scotch domainWeights / strategies / hierarchical (82 candidates, per-rank cost model) | nothing better than `(4 104)/(1 0.5)` |
 
 ## `scripts/` and `wmake-rules/`
 
