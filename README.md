@@ -12,10 +12,11 @@ built with Intel oneAPI ICX 2025.3 and Intel MPI 2021.17.
 | Bonus: Basic + `fixedIterSolvers` | 1.6684 | −15.6% | identical |
 | Bonus: + `fusedVectorSolve` v1 | 1.6066 | −18.7% | identical |
 | Bonus: + `fusedVectorSolve` v2 | 1.5919 | −19.5% | identical |
-| **Bonus: + `stepReuse`, `fixedIterSolvers` v2, `fusedVectorSolve` v3, cache `grad(p)`, `grad(k)`, `grad(omega)`** | **1.4815** | **−25.0%** | identical |
+| Bonus: + `stepReuse`, `fixedIterSolvers` v2, `fusedVectorSolve` v3, cache `grad(p)`, `grad(k)`, `grad(omega)` | 1.4815 | −25.0% | identical |
+| **Bonus: + `stepReuse` divDevReff and kOmegaSST per-cell fusion** | **1.4242** | **−27.9%** | identical |
 
 Basic and the first Bonus row ran in the same job (181332282); the v1 and v2 rows are separate jobs
-(181334343, 181363792, 181376794), each checked against the same Cd. Both solver changes are bit-identical to stock OpenFOAM: every solver log line, field and force
+(181334343, 181363792, 181376794, 181390148), each checked against the same Cd. Both solver changes are bit-identical to stock OpenFOAM: every solver log line, field and force
 coefficient matches.
 
 ## `tools/fixedIterSolvers` — solver plugin (main result)
