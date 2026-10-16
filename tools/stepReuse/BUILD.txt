@@ -2,4 +2,4 @@
 #   FOAM_EXTRA_CXXFLAGS="-xSAPPHIRERAPIDS -fp-model=precise" wmake libso
 # Use: mpirun ... -genv LD_PRELOAD lib/$WM_OPTIONS/libstepReuse.so simpleFoam -parallel
 #   gradient reuse also needs  cache { grad(k); grad(omega); }  in fvSolution
-#   STEP_REUSE_REPORT=1 prints which path ran; STEP_REUSE_OFF=gs,komega,wss switches parts off
+#   STEP_REUSE_REPORT=1 prints which path ran; STEP_REUSE_OFF=gs,komega,kfuse,divdev,lap,conv,grad,fco,wss switches parts off
