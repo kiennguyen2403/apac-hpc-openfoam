@@ -184,6 +184,27 @@ The laplacian, convection, gradient and forceCoeffs changes, on top of the setup
 | + convection, gradient, forceCoeffs | 1.3723 | −4.58% |
 | + laplacian | 1.3119 | −8.78% |
 
+## `tools/simpleFoamFused` — experimental, not yet run
+
+A modified `simpleFoam` (its momentum and pressure steps live in the solver executable, so they cannot be
+replaced by preloading). Intended to be bit-identical to `simpleFoam`; **not yet tested** (no identity test,
+no benchmark).
+
+- `solve(UEqn == -fvc::grad(p))` deep-copies the momentum matrix to add `V*(-grad(p))` to the source. Here
+  that source is built separately and swapped into `UEqn` for the solve, then swapped back (the solve leaves
+  the matrix unchanged).
+- `phiHbyA = fvc::flux(HbyA)` plus the SIMPLEC term `interpolate(rAtU - rAU)*snGrad(p)*magSf`: one face loop
+  instead of the flux, interpolation, snGrad, correction and product face fields.
+- `phi = phiHbyA - pEqn.flux()`: one face loop instead of the flux and difference face fields.
+- `HbyA -= (rAU - rAtU)*grad(p)` and `U = HbyA - rAtU*grad(p)`: one cell loop each.
+
+The two expressions the stock code leaves to FMA contraction (the linear interpolation and the matrix face
+flux) are written the same way; every other operation is a separate statement, as it is a separate field
+operation in the stock code. Falls back to the stock code (`stock/` holds the v2512 originals) unless the case
+is SIMPLEC, has no MRF zones, has a fixed-value pressure patch, and uses linear interpolation and corrected
+snGrad; `SIMPLEFOAM_FUSED_OFF=1` forces the stock code. Prepared: `identity_test.sh APP=<executable>` and
+`scripts/profile/compiler/sff_4node.sh` (4 nodes, `simpleFoam` vs `simpleFoamFused`).
+
 ## `tools/decompScore` — decomposition screening
 
 - `decompScore` (OpenFOAM utility): reads the mesh once, then forks one child per candidate

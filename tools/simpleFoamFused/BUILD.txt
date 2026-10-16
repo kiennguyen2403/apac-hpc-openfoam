@@ -1,0 +1,9 @@
+# simpleFoamFused: simpleFoam with fused momentum/pressure steps (fusedSteps.H), meant to be bit-identical.
+# Build: same flags as the ICX OptSPR build (required for bit-identity):
+#   FOAM_EXTRA_CXXFLAGS="-xSAPPHIRERAPIDS -fp-model=precise" wmake
+# -> bin/$WM_OPTIONS/simpleFoamFused (run it instead of simpleFoam; same case, same libraries/preloads)
+# SIMPLEFOAM_FUSED_OFF=1 runs the stock code; SIMPLEFOAM_FUSED_REPORT=1 prints which parts ran.
+# stock/ holds the v2512 simpleFoam.C, UEqn.H, pEqn.H it was made from.
+# Identity test (box case, stock simpleFoam vs this, serial and 4 ranks):
+#   qsub -v WORK=<dir>,APP=<path>/simpleFoamFused,PRELOAD=...,SOLVER_SED=...,LIBS=...,CACHE_KOMEGA=1,WSS=1,FCO=1,BOX_SKEW=1 \
+#        tools/fusedVectorSolve/test/identity_test.sh

@@ -14,6 +14,7 @@
 # function object on the wall, written at the last step), FCO=1 (forceCoeffs on the wall every step,
 # coefficient.dat compared), DEBUG_CACHE=1 (log solution cache use),
 # BOX_SKEW=1 (non-orthogonal box, read by make_box_case.sh).
+# Optional for the test arm: APP=<solver executable> instead of simpleFoam (e.g. simpleFoamFused).
 set -euo pipefail
 : "${WORK:?qsub -v WORK=<dir>}"
 T=/scratch/ya41/kn3896/openfoam/tools/fusedVectorSolve
@@ -23,12 +24,13 @@ module purge; module load intel-compiler-llvm/2025.3.2 intel-mpi/2021.17.2 > /de
 source /scratch/ya41/kn3896/openfoam/OpenFOAM-v2512/etc/bashrc WM_COMPILER_TYPE=system WM_COMPILER=Icx \
     WM_CC=icx WM_CXX=icpx WM_MPLIB=INTELMPI WM_COMPILE_OPTION=OptSPR > /dev/null 2>&1
 set -eu
-export WM_THIRD_PARTY_DIR=/apps/OpenFOAM/2512/ThirdParty-v2512 I_MPI_FABRICS=shm FOAM_SIGFPE=true FUSED_VECTOR_SOLVE_REPORT=1 CSR_AMUL_REPORT=1 GAMG_FUSED_REPORT=1 STEP_REUSE_REPORT=1
+export WM_THIRD_PARTY_DIR=/apps/OpenFOAM/2512/ThirdParty-v2512 I_MPI_FABRICS=shm FOAM_SIGFPE=true FUSED_VECTOR_SOLVE_REPORT=1 CSR_AMUL_REPORT=1 GAMG_FUSED_REPORT=1 STEP_REUSE_REPORT=1 SIMPLEFOAM_FUSED_REPORT=1
 mkdir -p "$WORK" && cd "$WORK"
 for l in ${FL//:/ }; do echo "library $l sha256 $(sha256sum "$l" | cut -d' ' -f1)"; done
 for v in stock fused; do
     bash "$T/test/make_box_case.sh" "$WORK/$v" > /dev/null
     pre=""; [[ $v == fused ]] && pre=$FL
+    app=simpleFoam; [[ $v == fused && -n ${APP:-} ]] && app=$APP
     [[ ${CACHE_KOMEGA:-0} == 1 ]] && echo 'cache { grad(k); grad(omega); }' >> "$WORK/$v/system/fvSolution"
     [[ ${DEBUG_CACHE:-0} == 1 ]] && echo 'DebugSwitches { solution 1; }' >> "$WORK/$v/system/controlDict"
     fos=""
@@ -38,10 +40,10 @@ for v in stock fused; do
     if [[ $v == fused && -n ${SOLVER_SED:-} ]]; then sed -i "$SOLVER_SED" "$WORK/$v/system/fvSolution"; grep -E 'solver' "$WORK/$v/system/fvSolution" | tr -s ' ' | head -3; fi
     if [[ $v == fused && -n ${LIBS:-} ]]; then echo "libs ($(for l in ${LIBS//:/ }; do printf '"%s" ' "$l"; done));" >> "$WORK/$v/system/controlDict"; tail -1 "$WORK/$v/system/controlDict"; fi
     (cd "$v" && blockMesh > log.blockMesh 2>&1 && cp -r . "../${v}_par"
-     LD_PRELOAD=$pre simpleFoam > log.serial 2>&1
-     echo "$v serial exit=$? steps=$(grep -c '^Time =' log.serial) $(grep -E 'fusedVectorSolve|csrAmul|gamgFused|stepReuse' log.serial | sort -u | tr '\n' ' ' || true)")
-    (cd "${v}_par" && decomposePar -force > log.decompose 2>&1 && mpirun -np 4 -genv LD_PRELOAD "$pre" simpleFoam -parallel > log.par 2>&1
-     echo "$v parallel exit=$? steps=$(grep -c '^Time =' log.par) $(grep -E 'fusedVectorSolve|csrAmul|gamgFused|stepReuse' log.par | sort -u | tr '\n' ' ' || true)"
+     LD_PRELOAD=$pre $app > log.serial 2>&1
+     echo "$v serial exit=$? steps=$(grep -c '^Time =' log.serial) $(grep -E 'fusedVectorSolve|csrAmul|gamgFused|stepReuse|simpleFoamFused' log.serial | sort -u | tr '\n' ' ' || true)")
+    (cd "${v}_par" && decomposePar -force > log.decompose 2>&1 && mpirun -np 4 -genv LD_PRELOAD "$pre" $app -parallel > log.par 2>&1
+     echo "$v parallel exit=$? steps=$(grep -c '^Time =' log.par) $(grep -E 'fusedVectorSolve|csrAmul|gamgFused|stepReuse|simpleFoamFused' log.par | sort -u | tr '\n' ' ' || true)"
      reconstructPar -latestTime > log.recon 2>&1)
 done
 for m in serial par; do

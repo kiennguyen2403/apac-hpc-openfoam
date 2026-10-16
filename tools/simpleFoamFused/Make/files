@@ -1,0 +1,3 @@
+simpleFoamFused.C
+
+EXE = /scratch/ya41/kn3896/openfoam/tools/simpleFoamFused/bin/$(WM_OPTIONS)/simpleFoamFused
