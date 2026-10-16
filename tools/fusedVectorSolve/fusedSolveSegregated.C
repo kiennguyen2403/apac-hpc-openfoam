@@ -14,6 +14,9 @@
     Per-component arithmetic and order are unchanged, so results, residuals
     and log output are bit-identical. Any other case runs the generic code
     (copied verbatim).
+
+    v3: all sweeps run as one sequence and the copy bPrime = source for the
+    next sweep happens inside the current one (see the sweep loop).
 \*---------------------------------------------------------------------------*/
 
 #include "fvMatrices.H"
@@ -23,7 +26,9 @@
 #include "PtrList.H"
 
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
+#include <type_traits>
 
 namespace Foam
 {
@@ -69,6 +74,13 @@ static controls readControls(const dictionary& d)
      && solverPerformance::debug < 2;
 
     return c;
+}
+
+// Feature switched off with env STEP_REUSE_OFF (comma list, e.g. "gs")
+static bool stepReuseOff(const char* key)
+{
+    const char* e = std::getenv("STEP_REUSE_OFF");
+    return e && std::strstr(e, key);
 }
 
 } // End namespace fusedVectorSolve
@@ -145,7 +157,9 @@ Foam::fvMatrix<Foam::vector>::solveSegregated
     {
         reported = true;
         std::cerr << "fusedVectorSolve: " << psi.name()
-            << (fused ? " fused path" : " generic path") << std::endl;
+            << (fused ? " fused path" : " generic path")
+            << (fused && !fusedVectorSolve::stepReuseOff("gs") ? " (v3 folded copy)" : "")
+            << std::endl;
     }
 
     if (fused)
@@ -374,14 +388,46 @@ Foam::fvMatrix<Foam::vector>::solveSegregated
             const scalar* const __restrict__ d1 = diagC[1].begin();
             const scalar* const __restrict__ d2 = diagC[2].begin();
 
+            const scalar* const __restrict__ s0 = sourceC[0].begin();
+            const scalar* const __restrict__ s1 = sourceC[1].begin();
+            const scalar* const __restrict__ s2 = sourceC[2].begin();
+
+            // Number of sweeps the smoothSolver iteration loop does
             label nIterations = 0;
+            label nCalls = 0;
             do
             {
-                for (label sweep=0; sweep<ctl.nSweeps; sweep++)
+                ++nCalls;
+            } while
+            (
+                (nIterations += ctl.nSweeps) < ctl.maxIter
+             || nIterations < ctl.minIter
+            );
+            const label nTotalSweeps = nCalls*ctl.nSweeps;
+
+            // v3: bPrime = source for the next sweep is done inside the
+            // current sweep, right after bPrime[celli] is read for the last
+            // time (later cells only write bPrime[j] for j > their own index).
+            // Same values, same operations: one streaming pass less per sweep.
+            // STEP_REUSE_OFF containing "gs" restores the separate copy.
+            const bool fold = !fusedVectorSolve::stepReuseOff("gs");
+
+            for (direction cmpt=0; cmpt<3; cmpt++)
+            {
+                bPrime[cmpt] = sourceC[cmpt];
+            }
+
+            for (label sweep=0; sweep<nTotalSweeps; sweep++)
+            {
+                const bool foldThis = fold && sweep + 1 < nTotalSweeps;
+
                 {
                     for (direction cmpt=0; cmpt<3; cmpt++)
                     {
-                        bPrime[cmpt] = sourceC[cmpt];
+                        if (sweep > 0 && !fold)
+                        {
+                            bPrime[cmpt] = sourceC[cmpt];
+                        }
 
                         const label startRequest = UPstream::nRequests();
 
@@ -407,49 +453,65 @@ Foam::fvMatrix<Foam::vector>::solveSegregated
                         );
                     }
 
-                    solveScalar p0, p1, p2;
-                    label fStart;
-                    label fEnd = ownStartPtr[0];
-
-                    for (label celli=0; celli<nCells; celli++)
+                    // Fold: compile-time flag, so the cell loop has no branch
+                    auto sweepCells = [&](auto foldTag)
                     {
-                        fStart = fEnd;
-                        fEnd = ownStartPtr[celli + 1];
+                        solveScalar p0, p1, p2;
+                        label fStart;
+                        label fEnd = ownStartPtr[0];
 
-                        p0 = b0[celli];
-                        p1 = b1[celli];
-                        p2 = b2[celli];
-
-                        for (label facei=fStart; facei<fEnd; facei++)
+                        for (label celli=0; celli<nCells; celli++)
                         {
-                            const label j = uPtr[facei];
-                            p0 -= upperPtr[facei]*psi0[j];
-                            p1 -= upperPtr[facei]*psi1[j];
-                            p2 -= upperPtr[facei]*psi2[j];
+                            fStart = fEnd;
+                            fEnd = ownStartPtr[celli + 1];
+
+                            p0 = b0[celli];
+                            p1 = b1[celli];
+                            p2 = b2[celli];
+
+                            if constexpr (decltype(foldTag)::value)
+                            {
+                                b0[celli] = s0[celli];
+                                b1[celli] = s1[celli];
+                                b2[celli] = s2[celli];
+                            }
+
+                            for (label facei=fStart; facei<fEnd; facei++)
+                            {
+                                const label j = uPtr[facei];
+                                p0 -= upperPtr[facei]*psi0[j];
+                                p1 -= upperPtr[facei]*psi1[j];
+                                p2 -= upperPtr[facei]*psi2[j];
+                            }
+
+                            p0 /= d0[celli];
+                            p1 /= d1[celli];
+                            p2 /= d2[celli];
+
+                            for (label facei=fStart; facei<fEnd; facei++)
+                            {
+                                const label j = uPtr[facei];
+                                b0[j] -= lowerPtr[facei]*p0;
+                                b1[j] -= lowerPtr[facei]*p1;
+                                b2[j] -= lowerPtr[facei]*p2;
+                            }
+
+                            psi0[celli] = p0;
+                            psi1[celli] = p1;
+                            psi2[celli] = p2;
                         }
+                    };
 
-                        p0 /= d0[celli];
-                        p1 /= d1[celli];
-                        p2 /= d2[celli];
-
-                        for (label facei=fStart; facei<fEnd; facei++)
-                        {
-                            const label j = uPtr[facei];
-                            b0[j] -= lowerPtr[facei]*p0;
-                            b1[j] -= lowerPtr[facei]*p1;
-                            b2[j] -= lowerPtr[facei]*p2;
-                        }
-
-                        psi0[celli] = p0;
-                        psi1[celli] = p1;
-                        psi2[celli] = p2;
+                    if (foldThis)
+                    {
+                        sweepCells(std::true_type());
+                    }
+                    else
+                    {
+                        sweepCells(std::false_type());
                     }
                 }
-            } while
-            (
-                (nIterations += ctl.nSweeps) < ctl.maxIter
-             || nIterations < ctl.minIter
-            );
+            }
 
             for (direction cmpt=0; cmpt<3; cmpt++)
             {

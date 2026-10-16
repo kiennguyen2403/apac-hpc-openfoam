@@ -44,6 +44,10 @@ carries its own copy of PCG's arithmetic loops):
 FOAM_EXTRA_CXXFLAGS="-xSAPPHIRERAPIDS -fp-model=precise" wmake libso
 ```
 
+v2: with a GaussSeidel smoother, `smoothSolverFixed` does all the sweeps of its iteration loop in
+one smoother call (n sweeps in one call are exactly n calls of one sweep), so the smoother can fold
+its per-sweep copy (see `tools/stepReuse`).
+
 `GaussSeidelNoCopy` (same library) is a GaussSeidel smoother that avoids the per-sweep
 `bPrime = source` copy. It is bit-identical but measured **2.8% slower** (the per-face branch
 costs more than the streaming copy), so it is not used.
@@ -85,10 +89,49 @@ three final residuals, instead of nine separate matrix passes. Global reductions
 so the MPI summation order is unchanged. Paired against v1 (4 nodes, 20 steps): **−1.22%**,
 bit-identical. Measured in a 150-step final run: 1.5919 s/step (v1: 1.6066).
 
+v3 runs all sweeps as one sequence and folds the per-sweep `bPrime = source` copy into the previous
+sweep, as `tools/stepReuse` does for the scalar GaussSeidel smoother.
+
 `test/` holds the bit-identity check used for every change: `make_box_case.sh` builds a 3D box case
 with the same boundary types as occDrivAerStaticMesh (slip, symmetry, wall functions, kOmegaSST), and
 `identity_test.sh` compares stock OpenFOAM with the preloaded library, serial and on 4 ranks
-(`qsub -v WORK=<dir> identity_test.sh`).
+(`qsub -v WORK=<dir> identity_test.sh`). Options: `SOLVER_SED`/`LIBS` (solver plugins in the test
+arm), `CACHE_KOMEGA=1`, `WSS=1` (wallShearStress function object, output compared), `DEBUG_CACHE=1`
+(log solution cache use) and `BOX_SKEW=1` (sheared, non-orthogonal box, so the corrected laplacian
+and snGrad terms compute their gradient correction).
+
+## `tools/stepReuse` — work done twice per step, done once
+
+One `LD_PRELOAD` library with three replacements, each bit-identical to stock OpenFOAM:
+
+- **GaussSeidel**, `GaussSeidelSmoother::smooth`: every sweep starts with `bPrime = source`, a
+  separate streaming pass. The copy for the next sweep now happens inside the current one, right after
+  `bPrime[celli]` is read for the last time (later cells only write `bPrime[j]` for `j > celli`). Same
+  values, same operations, one memory pass less per sweep. Applies to p (GAMG smoothing), and with
+  `smoothSolverFixed` v2 to k and omega; `fusedVectorSolve` v3 does the same for U.
+- **kOmegaSST**, `kOmegaSSTBase<...>::correct` (explicit specialisation): `fvc::surfaceIntegrate(phi)`
+  was computed three times (for `divU` and in the `bounded` correction of both convection terms) and
+  the upwind convection coefficients of omega and k, identical because the weights are `pos0(phi)`,
+  twice. Each is now built once; only the boundary coefficients are built per field.
+- **wallShearStress** function object: evaluated `devReff()` over the whole mesh every step but only
+  writes at write time (never, in a benchmark run). `execute()` now defers to `write()`, which runs the
+  stock `execute()` and `write()` (through `dlsym(RTLD_NEXT)`).
+
+Switch parts off with `STEP_REUSE_OFF=gs,komega,wss`; `STEP_REUSE_REPORT=1` prints which path ran.
+
+Also: `grad(k)` and `grad(omega)` in the fvSolution `cache` list. They are computed for `CDkOmega` and
+again by the corrected laplacian terms; the stock solution cache reuses them (no code needed), like
+`grad(p)`, which uncached is computed five times per step (box test with `DEBUG_CACHE=1`).
+
+Paired, 4 nodes, 20 steps, same nodes (job 181376137), bit-identical:
+
+| Arm | s/step | vs base |
+|---|---:|---:|
+| base: Bonus with `fusedVectorSolve` v2 and `grad(p)` cache | 1.6202 | – |
+| + `cache { grad(k); grad(omega); }` | 1.6098 | −0.64% |
+| + `stepReuse`, `fixedIterSolvers` v2, `fusedVectorSolve` v3 | 1.5503 | −4.31% |
+
+`grad(p)` in the cache list alone: −2.30% (job 181366105, bit-identical).
 
 ## `tools/decompScore` — decomposition screening
 
@@ -135,6 +178,8 @@ with node order and core order reversed. `tools/decompScore/analyse_imbalance.py
 | scotch domainWeights / strategies / hierarchical (82 candidates, per-rank cost model) | nothing better than `(4 104)/(1 0.5)` |
 | Weighted decomposition (`weightField`, faces-based / measured) | +5.6% / +8.3%: weights worsen scotch's cuts (max processor faces 24k → 40k); the cheap group's advantage is not a per-cell property |
 | Cell-based `Amul` for p (`csrAmul`, cell loops suggested by Culpo, PRACE 2012) | bit-identical, 2.4% slower: the extra index lookup and per-step CSR rebuild cost more than the scattered writes it avoids (CuthillMcKee ordering keeps those writes in cache); a cell-based GaussSeidel was therefore not built |
+| `GAMGFused` (`tools/gamgFused`): copy of GAMG with the residual, restriction and finest-level scaling fused | bit-identical, +0.2% (noise): the fused cell loops are cheap next to the face loops |
+| Hybrid MPI + OpenMP | not built: all 104 cores per node already run a rank, v2512 has no OpenMP in the simpleFoam path, the GaussSeidel smoother is sequential; ceiling about the MPI share (~10%) |
 | Two ranks per core (hyperthreading) | not available: a whole-node `normalsr` job's cpuset is `0-103`, one hyperthread per core |
 
 ## `scripts/` and `wmake-rules/`

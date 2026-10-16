@@ -8,10 +8,13 @@ C=$1
 mkdir -p "$C"/{0,constant,system}
 cd "$C"
 H='FoamFile { version 2.0; format ascii; class'
+# BOX_SKEW=1: shear the box in x (top shifted by 0.4) so the mesh is non-orthogonal and the
+# corrected laplacian/snGrad terms compute their gradient correction
+X0=0; X1=3; [[ ${BOX_SKEW:-0} == 1 ]] && { X0=0.4; X1=3.4; }
 cat > system/blockMeshDict <<EOF
 $H dictionary; object blockMeshDict; }
 scale 1;
-vertices ( (0 0 0) (3 0 0) (3 1 0) (0 1 0) (0 0 1) (3 0 1) (3 1 1) (0 1 1) );
+vertices ( (0 0 0) (3 0 0) (3 1 0) (0 1 0) ($X0 0 1) ($X1 0 1) ($X1 1 1) ($X0 1 1) );
 blocks ( hex (0 1 2 3 4 5 6 7) (30 12 12) simpleGrading (1 1 4) );
 boundary
 (

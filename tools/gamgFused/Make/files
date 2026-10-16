@@ -1,0 +1,7 @@
+GAMGFusedSolver.C
+GAMGFusedSolverAgglomerateMatrix.C
+GAMGFusedSolverInterpolate.C
+GAMGFusedSolverScale.C
+GAMGFusedSolverSolve.C
+
+LIB = /scratch/ya41/kn3896/openfoam/tools/gamgFused/lib/$(WM_OPTIONS)/libgamgFused

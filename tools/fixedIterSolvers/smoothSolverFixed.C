@@ -96,14 +96,35 @@ Foam::solverPerformance Foam::smoothSolverFixed::solve
             controlDict_
         );
 
-        do
+        if (nSweeps_ > 0 && smootherPtr->type() == "GaussSeidel")
         {
-            smootherPtr->smooth(psi, source, cmpt, nSweeps_);
-        } while
-        (
-            (solverPerf.nIterations() += nSweeps_) < maxIter_
-         || solverPerf.nIterations() < minIter_
-        );
+            // v2: GaussSeidel does n sweeps per call exactly as n calls of
+            // one sweep (per sweep: bPrime = source, interfaces, sweep), so
+            // all the sweeps of the loop below go into one call. Bit-identical,
+            // and lets a smoother fold the per-sweep copy (tools/stepReuse).
+            label nCalls = 0;
+            do
+            {
+                ++nCalls;
+            } while
+            (
+                (solverPerf.nIterations() += nSweeps_) < maxIter_
+             || solverPerf.nIterations() < minIter_
+            );
+
+            smootherPtr->smooth(psi, source, cmpt, nCalls*nSweeps_);
+        }
+        else
+        {
+            do
+            {
+                smootherPtr->smooth(psi, source, cmpt, nSweeps_);
+            } while
+            (
+                (solverPerf.nIterations() += nSweeps_) < maxIter_
+             || solverPerf.nIterations() < minIter_
+            );
+        }
 
         residual =
             matrix_.residual(psi, source, interfaceBouCoeffs_, interfaces_, cmpt);
