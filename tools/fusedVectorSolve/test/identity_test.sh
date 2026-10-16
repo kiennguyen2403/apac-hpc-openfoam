@@ -11,7 +11,8 @@
 # Optional for the test arm: SOLVER_SED (sed expression applied to system/fvSolution, e.g.
 # 's/solver GAMG;/solver GAMGFused;/') and LIBS (library path(s) added to controlDict libs).
 # Optional for both arms: CACHE_KOMEGA=1 (cache grad(k), grad(omega)), WSS=1 (wallShearStress
-# function object on the wall, written at the last step), DEBUG_CACHE=1 (log solution cache use),
+# function object on the wall, written at the last step), FCO=1 (forceCoeffs on the wall every step,
+# coefficient.dat compared), DEBUG_CACHE=1 (log solution cache use),
 # BOX_SKEW=1 (non-orthogonal box, read by make_box_case.sh).
 set -euo pipefail
 : "${WORK:?qsub -v WORK=<dir>}"
@@ -30,7 +31,10 @@ for v in stock fused; do
     pre=""; [[ $v == fused ]] && pre=$FL
     [[ ${CACHE_KOMEGA:-0} == 1 ]] && echo 'cache { grad(k); grad(omega); }' >> "$WORK/$v/system/fvSolution"
     [[ ${DEBUG_CACHE:-0} == 1 ]] && echo 'DebugSwitches { solution 1; }' >> "$WORK/$v/system/controlDict"
-    [[ ${WSS:-0} == 1 ]] && echo 'functions { wss { type wallShearStress; libs (fieldFunctionObjects); patches (ground); writeControl writeTime; } }' >> "$WORK/$v/system/controlDict"
+    fos=""
+    [[ ${WSS:-0} == 1 ]] && fos="$fos wss { type wallShearStress; libs (fieldFunctionObjects); patches (ground); writeControl writeTime; }"
+    [[ ${FCO:-0} == 1 ]] && fos="$fos fco { type forceCoeffs; libs (forces); patches (ground); rho rhoInf; rhoInf 1; CofR (0 0 0); liftDir (0 0 1); dragDir (1 0 0); pitchAxis (0 1 0); magUInf 10; lRef 1; Aref 1; writeControl timeStep; writeInterval 1; }"
+    if [[ -n $fos ]]; then echo "functions { $fos }" >> "$WORK/$v/system/controlDict"; fi
     if [[ $v == fused && -n ${SOLVER_SED:-} ]]; then sed -i "$SOLVER_SED" "$WORK/$v/system/fvSolution"; grep -E 'solver' "$WORK/$v/system/fvSolution" | tr -s ' ' | head -3; fi
     if [[ $v == fused && -n ${LIBS:-} ]]; then echo "libs ($(for l in ${LIBS//:/ }; do printf '"%s" ' "$l"; done));" >> "$WORK/$v/system/controlDict"; tail -1 "$WORK/$v/system/controlDict"; fi
     (cd "$v" && blockMesh > log.blockMesh 2>&1 && cp -r . "../${v}_par"
@@ -43,6 +47,10 @@ done
 for m in serial par; do
     s=stock; f=fused; [[ $m == par ]] && s=stock_par f=fused_par
     r=""; for fld in U p k omega nut; do cmp -s "$s/20/$fld" "$f/20/$fld" || r="$r $fld"; done
+    if [[ ${FCO:-0} == 1 ]]; then
+        cmp -s <(grep -hv '^#' "$s"/postProcessing/fco/*/coefficient*.dat) <(grep -hv '^#' "$f"/postProcessing/fco/*/coefficient*.dat) || r="$r coefficient.dat"
+        [[ -s $(ls "$s"/postProcessing/fco/*/coefficient*.dat | head -1) ]] || r="$r coefficient.dat-missing"
+    fi
     if [[ ${WSS:-0} == 1 ]]; then
         cmp -s "$s/20/wallShearStress" "$f/20/wallShearStress" || r="$r wallShearStress"
         diff -q <(cat "$s"/postProcessing/wss/*/*.dat) <(cat "$f"/postProcessing/wss/*/*.dat) > /dev/null || r="$r wss.dat"

@@ -127,12 +127,25 @@ One `LD_PRELOAD` library with three replacements, each bit-identical to stock Op
   `nuEff()` was evaluated twice. Now `X = nuEff*dev2(T(gradU))` is one cell loop and the interpolation,
   `Sf &` and surface integral one face loop, adding to owner and neighbour in face order and then the
   patches, as `surfaceIntegrate` does, so every cell sum is unchanged.
+- **Laplacian** (`laplacianScheme<Type, scalar>::fvmLaplacian` with a volume gamma: U, k, omega and p):
+  Gauss linear corrected made the interpolated gamma, gamma*|Sf|, the correction and gamma*|Sf|*correction
+  as face fields, then a surface integral. Now one face loop does the interpolation, coefficients, diagonal
+  (in negSumDiag order) and correction flux (in surfaceIntegrate order); the interpolation expression is the
+  stock one, left to the same contraction. The flux correction p needs is stored as before.
+- **U convection** (`gaussConvectionScheme<vector>::fvmDiv` with `linearUpwindV`): weights, coefficients and
+  the limited correction (the linearUpwindV code) in one face loop, added to the cells directly instead of a
+  correction face field, a flux face field and a surface integral.
+- **Gauss gradient** (`gaussGrad<Type>::calcGrad`, both the returning and the in-place version used by the
+  solution cache): the interpolation inside the gradient's face loop.
+- **forceCoeffs**: the two full-mesh coefficient fields are only computed with `writeFields` on; the written
+  coefficients come from the summed patch forces (`execute()` is replaced too, since the library inlines
+  `reset()` into it).
 - **wallShearStress** function object: evaluated `devReff()` over the whole mesh every step but only
   writes at write time (never, in a benchmark run). `execute()` now defers to `write()`, which runs the
   stock `execute()` and `write()` (through `dlsym(RTLD_NEXT)`).
 
-Switch parts off with `STEP_REUSE_OFF=gs,komega,kfuse,divdev,wss`; `STEP_REUSE_REPORT=1` prints which
-path ran.
+Switch parts off with `STEP_REUSE_OFF=gs,komega,kfuse,divdev,lap,conv,grad,fco,wss`; `STEP_REUSE_REPORT=1`
+prints which path ran.
 
 Also: `grad(k)` and `grad(omega)` in the fvSolution `cache` list. They are computed for `CDkOmega` and
 again by the corrected laplacian terms; the stock solution cache reuses them (no code needed), like
@@ -160,6 +173,15 @@ nodes, bit-identical):
 | base: the setup measured at 1.4815 | 1.4959 | – |
 | + divDevReff fused | 1.4744 | −1.43% |
 | + kOmegaSST per-cell maths fused | 1.4431 | −3.53% |
+
+The laplacian, convection, gradient and forceCoeffs changes, on top of the setup measured at 1.4242 (job
+181412786, 4 nodes, 20 steps, same nodes, bit-identical):
+
+| Arm | s/step | vs base |
+|---|---:|---:|
+| base: the setup measured at 1.4242 | 1.4382 | – |
+| + convection, gradient, forceCoeffs | 1.3723 | −4.58% |
+| + laplacian | 1.3119 | −8.78% |
 
 ## `tools/decompScore` — decomposition screening
 
@@ -208,6 +230,7 @@ with node order and core order reversed. `tools/decompScore/analyse_imbalance.py
 | Cell-based `Amul` for p (`csrAmul`, cell loops suggested by Culpo, PRACE 2012) | bit-identical, 2.4% slower: the extra index lookup and per-step CSR rebuild cost more than the scattered writes it avoids (CuthillMcKee ordering keeps those writes in cache); a cell-based GaussSeidel was therefore not built |
 | `GAMGFused` (`tools/gamgFused`): copy of GAMG with the residual, restriction and finest-level scaling fused | bit-identical, +0.2% (noise): the fused cell loops are cheap next to the face loops |
 | Hybrid MPI + OpenMP | not built: all 104 cores per node already run a rank, v2512 has no OpenMP in the simpleFoam path, the GaussSeidel smoother is sequential; ceiling about the MPI share (~10%) |
+| Cp (`pressure` function object) evaluated at write only | not done: the patch probes sample `cp`, so deferring it is only correct because of the function-object order; ~0.15% |
 | Two GaussSeidel sweeps per pass over memory (second sweep trailing the first through a cache window) | not built: keeping the results exact needs processor-boundary cells last and a window of about two boundary layers; from the per-rank processor faces that is 2.2–4.2 MB for p and 4.5–8.8 MB for the fused U sweep per rank, larger than the 2 MB L2, and largest on the slowest ranks. A version that fits (current ordering, stale halo values in every second sweep) changes the smoother |
 | Two ranks per core (hyperthreading) | not available: a whole-node `normalsr` job's cpuset is `0-103`, one hyperthread per core |
 
