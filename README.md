@@ -10,10 +10,11 @@ built with Intel oneAPI ICX 2025.3 and Intel MPI 2021.17.
 |---|---:|---:|---|
 | Basic: ICX-SPR + Intel MPI (tuned Allreduce, scatter pinning), scotch `(4 104)/(1 0.5)`, glibc malloc tuning | 1.9765 | – | 0.28738062413153675 |
 | Bonus: Basic + `fixedIterSolvers` | 1.6684 | −15.6% | identical |
-| Bonus: + `fusedVectorSolve` | 1.6066 | −18.7% | identical |
+| Bonus: + `fusedVectorSolve` v1 | 1.6066 | −18.7% | identical |
+| **Bonus: + `fusedVectorSolve` v2** | **1.5919** | **−19.5%** | identical |
 
-Basic and the first Bonus row ran in the same job (181332282); the last row is a separate job (181334343),
-checked against the same Cd. Both solver changes are bit-identical to stock OpenFOAM: every solver log line, field and force
+Basic and the first Bonus row ran in the same job (181332282); the v1 and v2 rows are separate jobs
+(181334343, 181363792), each checked against the same Cd. Both solver changes are bit-identical to stock OpenFOAM: every solver log line, field and force
 coefficient matches.
 
 ## `tools/fixedIterSolvers` — solver plugin (main result)
@@ -82,7 +83,7 @@ v2 also fuses the passes around the sweeps: the three components' A·ψ and row 
 for the initial residual and norm factor) are computed in one pass over the faces, and so are the
 three final residuals, instead of nine separate matrix passes. Global reductions stay per component,
 so the MPI summation order is unchanged. Paired against v1 (4 nodes, 20 steps): **−1.22%**,
-bit-identical. The 1.6066 s/step final result above was measured with v1.
+bit-identical. Measured in a 150-step final run: 1.5919 s/step (v1: 1.6066).
 
 `test/` holds the bit-identity check used for every change: `make_box_case.sh` builds a 3D box case
 with the same boundary types as occDrivAerStaticMesh (slip, symmetry, wall functions, kOmegaSST), and
@@ -104,6 +105,25 @@ Finding: per-step cost per rank tracks neighbour count; no scotch setting beat
 `domains (4 104); domainWeights (1 0.5);` for this case. Note OpenFOAM truncates
 `domainWeights` to integer ratios (`int(w/min)`), so `(1 0.4)` equals `(1 0.5)`.
 
+## Load-imbalance diagnosis
+
+About 19% of each step is ranks waiting for the slowest one. `scripts/profile/compiler/diag_imbalance_4node.sh`
+measures per-rank compute (APS elapsed − MPI, 25 minus 5 steps) twice: with the normal rank placement and
+with node order and core order reversed. `tools/decompScore/analyse_imbalance.py` compares the two.
+
+- Per-rank time follows the **subdomain** (correlation +0.92 across placements), not the hardware (no
+  node, socket or NUMA effect). The slowest rank is ~7% above the median.
+- One scotch node group (ranks 0–103) is ~11% cheaper per rank than the others, with the same cell count.
+- `decompScore` now also reports internal faces, wall faces and wall cells per rank;
+  `fit_cell_cost.py` fits per-rank cost on them: cost follows **faces** (~7.5 µs per face per step) plus
+  ~6.5 µs extra per wall face; cells add nothing once faces are counted (R² 0.39).
+- `tools/cellWeights` writes integer per-cell weights for `decomposePar`'s `weightField` (faces-based, or
+  scaled per rank by measured cost). OpenFOAM converts weights with `int(w/min)`, so the tool sets one
+  cell to 1 and dithers the rest; otherwise most weights would be truncated away.
+- `tools/csrAmul` (LD_PRELOAD) builds `lowerCSR` for the pressure matrix so `lduMatrix::Amul` takes its
+  cell-based (gather) loop. `losort` is stable, so this is bit-identical.
+- `tools/smtprobe` + `smt_probe_1node.sh`: checks whether a second rank per core (hyperthread) can be used.
+
 ## Tried and rejected
 
 | Change | Result |
@@ -113,6 +133,9 @@ Finding: per-step cost per rank tracks neighbour count; no scotch setting beat
 | Single-reduction coarsest-level PCG | not built: APS showed `Allreduce` is ~89% load-imbalance wait, ~0.4% to gain |
 | KaHIP (team partition, max 37 neighbours, half the inter-node faces) | −0.36% vs scotch `(1 0.5)`, within noise |
 | scotch domainWeights / strategies / hierarchical (82 candidates, per-rank cost model) | nothing better than `(4 104)/(1 0.5)` |
+| Weighted decomposition (`weightField`, faces-based / measured) | +5.6% / +8.3%: weights worsen scotch's cuts (max processor faces 24k → 40k); the cheap group's advantage is not a per-cell property |
+| Cell-based `Amul` for p (`csrAmul`, cell loops suggested by Culpo, PRACE 2012) | bit-identical, 2.4% slower: the extra index lookup and per-step CSR rebuild cost more than the scattered writes it avoids (CuthillMcKee ordering keeps those writes in cache); a cell-based GaussSeidel was therefore not built |
+| Two ranks per core (hyperthreading) | not available: a whole-node `normalsr` job's cpuset is `0-103`, one hyperthread per core |
 
 ## `scripts/` and `wmake-rules/`
 

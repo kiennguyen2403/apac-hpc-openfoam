@@ -15,6 +15,7 @@
                        -outDir <dir> [-ranksPerNode 104] [-nParallel 1]
     Output: <outDir>/<name>.ranks with columns
             rank cells procFaces bndFaces neighbours offNodeFaces
+            internalFaces wallFaces wallCells
 \*---------------------------------------------------------------------------*/
 
 #include "argList.H"
@@ -24,6 +25,7 @@
 #include "IFstream.H"
 #include "OFstream.H"
 #include "clockTime.H"
+#include "wallPolyPatch.H"
 
 #include <sys/wait.h>
 #include <unistd.h>
@@ -56,6 +58,7 @@ static void scoreCandidate
     const scalar tDecomp = timer.timeIncrement();
 
     labelList nCells(n, Zero), nProc(n, Zero), nBnd(n, Zero), nOff(n, Zero);
+    labelList nInt(n, Zero), nWall(n, Zero), nWallCells(n, Zero);
     labelList shared(n*n, Zero);
     for (const label proci : cellToProc) ++nCells[proci];
     for (label facei = 0; facei < nInternal; ++facei)
@@ -68,23 +71,46 @@ static void scoreCandidate
             ++shared[a*n + b]; ++shared[b*n + a];
             if (a/ranksPerNode != b/ranksPerNode) { ++nOff[a]; ++nOff[b]; }
         }
+        else
+        {
+            ++nInt[a];
+        }
     }
     for (label facei = nInternal; facei < nFaces; ++facei)
     {
         ++nBnd[cellToProc[own[facei]]];
+    }
+    boolList isWallCell(mesh.nCells(), false);
+    for (const polyPatch& pp : mesh.boundaryMesh())
+    {
+        if (isA<wallPolyPatch>(pp))
+        {
+            forAll(pp, i)
+            {
+                const label celli = own[pp.start() + i];
+                ++nWall[cellToProc[celli]];
+                isWallCell[celli] = true;
+            }
+        }
+    }
+    forAll(isWallCell, celli)
+    {
+        if (isWallCell[celli]) ++nWallCells[cellToProc[celli]];
     }
 
     label maxCells = 0, maxProc = 0, maxNbr = 0, totProc = 0;
     {
         OFstream os(outDir/name + ".ranks");
         os  << "# candidate " << name << " dict " << dictPath << nl
-            << "# rank cells procFaces bndFaces neighbours offNodeFaces" << nl;
+            << "# rank cells procFaces bndFaces neighbours offNodeFaces"
+               " internalFaces wallFaces wallCells" << nl;
         for (label proci = 0; proci < n; ++proci)
         {
             label nNbr = 0;
             for (label j = 0; j < n; ++j) if (shared[proci*n + j]) ++nNbr;
             os  << proci << ' ' << nCells[proci] << ' ' << nProc[proci] << ' '
-                << nBnd[proci] << ' ' << nNbr << ' ' << nOff[proci] << nl;
+                << nBnd[proci] << ' ' << nNbr << ' ' << nOff[proci] << ' '
+                << nInt[proci] << ' ' << nWall[proci] << ' ' << nWallCells[proci] << nl;
             maxCells = max(maxCells, nCells[proci]);
             maxProc = max(maxProc, nProc[proci]);
             maxNbr = max(maxNbr, nNbr);

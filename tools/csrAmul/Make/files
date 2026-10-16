@@ -1,0 +1,3 @@
+csrSolveSegregated.C
+
+LIB = /scratch/ya41/kn3896/openfoam/tools/csrAmul/lib/$(WM_OPTIONS)/libcsrAmul
