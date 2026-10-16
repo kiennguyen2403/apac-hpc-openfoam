@@ -2,5 +2,6 @@ stepReuse.C
 gaussSeidelFold.C
 kOmegaSSTReuse.C
 wallShearStressLazy.C
+divDevReffFused.C
 
 LIB = /scratch/ya41/kn3896/openfoam/tools/stepReuse/lib/$(WM_OPTIONS)/libstepReuse

@@ -24,7 +24,8 @@
 #           Since job 181376137 (-4.31% at 4n, bit-identical) also: tools/stepReuse (LD_PRELOAD:
 #           GaussSeidel folded per-sweep copy, kOmegaSST shared divU/convection, wallShearStress
 #           evaluated at write only), fixedIterSolvers v2, fusedVectorSolve v3, and "grad(k); grad(omega);"
-#           in the cache block.
+#           in the cache block. Since job 181379590 (-3.53% at 4n, bit-identical) stepReuse also fuses
+#           divDevReff and the kOmegaSST per-cell maths (stepReuse lib_v1 = the build measured in 181376794).
 #           (Job 181332282 ran bonus without the fused vector solve.)
 # Prepared cases (prep chain done once, reused): 1n vtune/drivaer_1node_icx_180728663/case,
 # 2n final/case208 (parallel prep done here on first use), 4n decomp-screen/case416_w05.
@@ -153,7 +154,8 @@ run() {   # $1 arm (basic|bonus), $2 repeat
     if [[ $a == bonus ]]; then
         grep -q 'fusedVectorSolve: U fused path (v3 folded copy)' "$dir/simpleFoam.log"
         grep -q 'stepReuse: GaussSeidel: folded' "$dir/simpleFoam.log"
-        grep -q 'stepReuse: kOmegaSST: shared' "$dir/simpleFoam.log"
+        grep -q 'stepReuse: kOmegaSST: shared divU and k/omega convection, fused per-cell maths' "$dir/simpleFoam.log"
+        grep -q 'stepReuse: divDevReff: fused explicit term' "$dir/simpleFoam.log"
         grep -q 'stepReuse: wallShearStress: evaluated in write' "$dir/simpleFoam.log"
     fi
     local cd=$(awk '!/^#/ {last=$2} END {print last}' "$dir"/postProcessing/forceCoeffsAll/*/coefficient*.dat)

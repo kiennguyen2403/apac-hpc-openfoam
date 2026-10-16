@@ -11,10 +11,11 @@ built with Intel oneAPI ICX 2025.3 and Intel MPI 2021.17.
 | Basic: ICX-SPR + Intel MPI (tuned Allreduce, scatter pinning), scotch `(4 104)/(1 0.5)`, glibc malloc tuning | 1.9765 | – | 0.28738062413153675 |
 | Bonus: Basic + `fixedIterSolvers` | 1.6684 | −15.6% | identical |
 | Bonus: + `fusedVectorSolve` v1 | 1.6066 | −18.7% | identical |
-| **Bonus: + `fusedVectorSolve` v2** | **1.5919** | **−19.5%** | identical |
+| Bonus: + `fusedVectorSolve` v2 | 1.5919 | −19.5% | identical |
+| **Bonus: + `stepReuse`, `fixedIterSolvers` v2, `fusedVectorSolve` v3, cache `grad(p)`, `grad(k)`, `grad(omega)`** | **1.4815** | **−25.0%** | identical |
 
 Basic and the first Bonus row ran in the same job (181332282); the v1 and v2 rows are separate jobs
-(181334343, 181363792), each checked against the same Cd. Both solver changes are bit-identical to stock OpenFOAM: every solver log line, field and force
+(181334343, 181363792, 181376794), each checked against the same Cd. Both solver changes are bit-identical to stock OpenFOAM: every solver log line, field and force
 coefficient matches.
 
 ## `tools/fixedIterSolvers` — solver plugin (main result)
@@ -113,11 +114,24 @@ One `LD_PRELOAD` library with three replacements, each bit-identical to stock Op
   was computed three times (for `divU` and in the `bounded` correction of both convection terms) and
   the upwind convection coefficients of omega and k, identical because the weights are `pos0(phi)`,
   twice. Each is now built once; only the boundary coefficients are built per field.
+- **kOmegaSST per-cell maths**: S2, GbyNu0, CDkOmega, F1, F23 (twice per step), GbyNu, gamma, beta,
+  DkEff, DomegaEff and nut were each built from one field operation (and one temporary field) per
+  arithmetic operation, about 60 cell-sized temporaries per step. Each is now one loop over the cells
+  and one per patch. Every value goes through the same scalar operations in the same order, with FMA
+  contraction off in these loops (`#pragma clang fp contract(off)`, checked to be honoured by ICX; the
+  stock field operations are one operation per loop, so nothing is contracted there), and the tensor
+  functions are the same inline functions. Plain `kOmegaSST` with `F3 off` only.
+- **divDevReff**, `linearViscousStress<...>::divDevRhoReff`: the explicit term
+  `fvc::div(nuEff*dev2(T(grad(U))))` made three tensor temporaries, a face field and two passes, and
+  `nuEff()` was evaluated twice. Now `X = nuEff*dev2(T(gradU))` is one cell loop and the interpolation,
+  `Sf &` and surface integral one face loop, adding to owner and neighbour in face order and then the
+  patches, as `surfaceIntegrate` does, so every cell sum is unchanged.
 - **wallShearStress** function object: evaluated `devReff()` over the whole mesh every step but only
   writes at write time (never, in a benchmark run). `execute()` now defers to `write()`, which runs the
   stock `execute()` and `write()` (through `dlsym(RTLD_NEXT)`).
 
-Switch parts off with `STEP_REUSE_OFF=gs,komega,wss`; `STEP_REUSE_REPORT=1` prints which path ran.
+Switch parts off with `STEP_REUSE_OFF=gs,komega,kfuse,divdev,wss`; `STEP_REUSE_REPORT=1` prints which
+path ran.
 
 Also: `grad(k)` and `grad(omega)` in the fvSolution `cache` list. They are computed for `CDkOmega` and
 again by the corrected laplacian terms; the stock solution cache reuses them (no code needed), like
@@ -132,6 +146,19 @@ Paired, 4 nodes, 20 steps, same nodes (job 181376137), bit-identical:
 | + `stepReuse`, `fixedIterSolvers` v2, `fusedVectorSolve` v3 | 1.5503 | −4.31% |
 
 `grad(p)` in the cache list alone: −2.30% (job 181366105, bit-identical).
+
+Attribution (job 181376795, 4 nodes, 20 steps, same nodes): all −4.47%; without the kOmegaSST
+part −2.97% (so ~1.5% from it); without the GaussSeidel fold −3.51% (~1.0%); the cache entries
+~0.6% (above). Measured over 150 steps on top of `grad(p)` caching: 1.4815 s/step (job 181376794).
+
+The divDevReff and kOmegaSST per-cell fusions, on top of that (job 181379590, 4 nodes, 20 steps, same
+nodes, bit-identical):
+
+| Arm | s/step | vs base |
+|---|---:|---:|
+| base: the setup measured at 1.4815 | 1.4959 | – |
+| + divDevReff fused | 1.4744 | −1.43% |
+| + kOmegaSST per-cell maths fused | 1.4431 | −3.53% |
 
 ## `tools/decompScore` — decomposition screening
 
@@ -180,6 +207,7 @@ with node order and core order reversed. `tools/decompScore/analyse_imbalance.py
 | Cell-based `Amul` for p (`csrAmul`, cell loops suggested by Culpo, PRACE 2012) | bit-identical, 2.4% slower: the extra index lookup and per-step CSR rebuild cost more than the scattered writes it avoids (CuthillMcKee ordering keeps those writes in cache); a cell-based GaussSeidel was therefore not built |
 | `GAMGFused` (`tools/gamgFused`): copy of GAMG with the residual, restriction and finest-level scaling fused | bit-identical, +0.2% (noise): the fused cell loops are cheap next to the face loops |
 | Hybrid MPI + OpenMP | not built: all 104 cores per node already run a rank, v2512 has no OpenMP in the simpleFoam path, the GaussSeidel smoother is sequential; ceiling about the MPI share (~10%) |
+| Two GaussSeidel sweeps per pass over memory (second sweep trailing the first through a cache window) | not built: keeping the results exact needs processor-boundary cells last and a window of about two boundary layers; from the per-rank processor faces that is 2.2–4.2 MB for p and 4.5–8.8 MB for the fused U sweep per rank, larger than the 2 MB L2, and largest on the slowest ranks. A version that fits (current ordering, stale halo values in every second sweep) changes the smoother |
 | Two ranks per core (hyperthreading) | not available: a whole-node `normalsr` job's cpuset is `0-103`, one hyperthread per core |
 
 ## `scripts/` and `wmake-rules/`
