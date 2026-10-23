@@ -14,10 +14,11 @@ built with Intel oneAPI ICX 2025.3 and Intel MPI 2021.17.
 | Bonus: + `fusedVectorSolve` v2 | 1.5919 | −19.5% | identical |
 | Bonus: + `stepReuse`, `fixedIterSolvers` v2, `fusedVectorSolve` v3, cache `grad(p)`, `grad(k)`, `grad(omega)` | 1.4815 | −25.0% | identical |
 | Bonus: + `stepReuse` divDevReff and kOmegaSST per-cell fusion | 1.4242 | −27.9% | identical |
-| **Bonus: + `stepReuse` laplacian, convection, gradient fusion, lazy forceCoeffs fields** | **1.3060** | **−33.9%** | identical |
+| Bonus: + `stepReuse` laplacian, convection, gradient fusion, lazy forceCoeffs fields | 1.3060 | −33.9% | identical |
+| **Bonus: + `simpleFoamFused`** | **1.2675** | **−35.9%** | identical |
 
 Basic and the first Bonus row ran in the same job (181332282); the v1 and v2 rows are separate jobs
-(181334343, 181363792, 181376794, 181390148, 181413566), each checked against the same Cd. Both solver changes are bit-identical to stock OpenFOAM: every solver log line, field and force
+(181334343, 181363792, 181376794, 181390148, 181413566, 182135721), each checked against the same Cd. Both solver changes are bit-identical to stock OpenFOAM: every solver log line, field and force
 coefficient matches.
 
 ## `tools/fixedIterSolvers` — solver plugin (main result)
@@ -184,7 +185,7 @@ The laplacian, convection, gradient and forceCoeffs changes, on top of the setup
 | + convection, gradient, forceCoeffs | 1.3723 | −4.58% |
 | + laplacian | 1.3119 | −8.78% |
 
-## `tools/simpleFoamFused` — experimental
+## `tools/simpleFoamFused` — simpleFoam with fused momentum/pressure steps
 
 A modified `simpleFoam` (its momentum and pressure steps live in the solver executable, so they cannot be
 replaced by preloading). Bit-identical to `simpleFoam` (box identity test, serial and 4 ranks: every field,
@@ -205,7 +206,8 @@ flux) are written the same way; every other operation is a separate statement, a
 operation in the stock code. Falls back to the stock code (`stock/` holds the v2512 originals) unless the case
 is SIMPLEC, has no MRF zones, has a fixed-value pressure patch, and uses linear interpolation and corrected
 snGrad; `SIMPLEFOAM_FUSED_OFF=1` forces the stock code. Prepared: `identity_test.sh APP=<executable>` and
-`scripts/profile/compiler/sff_4node.sh` (4 nodes, `simpleFoam` vs `simpleFoamFused`).
+`scripts/profile/compiler/sff_4node.sh` (4 nodes, `simpleFoam` vs `simpleFoamFused`). The bonus arm of
+`scripts/final/final_runs.sh` runs `simpleFoamFused`.
 
 ## `tools/decompScore` — decomposition screening
 

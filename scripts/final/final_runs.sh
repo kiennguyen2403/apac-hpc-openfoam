@@ -29,6 +29,8 @@
 #           Since job 181412786 (-8.78% at 4n, bit-identical) stepReuse also fuses the Gauss laplacian,
 #           the linearUpwindV convection of U and the Gauss gradient, and skips the forceCoeffs coefficient
 #           fields without writeFields (stepReuse lib_v2 = the build measured at 1.4242, job 181390148).
+#           Since job 182135600 (-2.72% at 4n, bit-identical) the bonus arm runs tools/simpleFoamFused
+#           (simpleFoam with fused momentum/pressure steps) instead of simpleFoam; basic runs simpleFoam.
 #           (Job 181332282 ran bonus without the fused vector solve.)
 # Prepared cases (prep chain done once, reused): 1n vtune/drivaer_1node_icx_180728663/case,
 # 2n final/case208 (parallel prep done here on first use), 4n decomp-screen/case416_w05.
@@ -46,6 +48,7 @@ RES=/scratch/ya41/kn3896/openfoam/contest-results
 LIB=/scratch/ya41/kn3896/openfoam/tools/fixedIterSolvers/lib/linux64IcxDPInt32OptSPR/libfixedIterSolvers.so
 FLIB=/scratch/ya41/kn3896/openfoam/tools/fusedVectorSolve/lib/linux64IcxDPInt32OptSPR/libfusedVectorSolve.so
 RLIB=/scratch/ya41/kn3896/openfoam/tools/stepReuse/lib/linux64IcxDPInt32OptSPR/libstepReuse.so
+SFF=/scratch/ya41/kn3896/openfoam/tools/simpleFoamFused/bin/linux64IcxDPInt32OptSPR/simpleFoamFused
 TIMER_SRC=$RES/vtune/drivaer_1node_icx_180728663/case/dynamicCode
 ROOT=$RES/final/runs_${NNODES}n_${PBS_JOBID%%.*}
 case $NNODES in
@@ -62,7 +65,7 @@ cd "$ROOT"
 [[ $(sort -u "$PBS_NODEFILE" | wc -l) == $NNODES ]]
 cp "$TEAM/run/${NNODES}node/intel-scatter-cpus.awk" "$TEAM/run/${NNODES}node/intelmpi-allreduce-${NNODES}n-104ppn-scatter.dat" .
 [[ $(sed -n 's/^endTime *\([0-9]*\);.*/\1/p' "$TEAM/dicts/${NNODES}node/controlDict") == $STEPS ]]
-[[ -f $LIB && -f $FLIB && -f $RLIB ]]
+[[ -f $LIB && -f $FLIB && -f $RLIB && -x $SFF ]]
 for a in $ARMS; do [[ $a == basic || $a == bonus ]]; done
 grep -q '^End' "$LOGS/10_decomposePar.log"
 
@@ -127,6 +130,7 @@ glibcT=(-genv MALLOC_MMAP_THRESHOLD_ 33554432 -genv MALLOC_TRIM_THRESHOLD_ 42949
     echo "plugin=$LIB sha256=$(sha256sum "$LIB" | cut -d' ' -f1)"
     echo "fused=$FLIB sha256=$(sha256sum "$FLIB" | cut -d' ' -f1)"
     echo "stepReuse=$RLIB sha256=$(sha256sum "$RLIB" | cut -d' ' -f1)"
+    echo "simpleFoamFused=$SFF sha256=$(sha256sum "$SFF" | cut -d' ' -f1)"
 } > build-metadata.txt
 mpirun -np $NP -ppn 104 hostname | sort | uniq -c > placement.txt
 if [[ $(wc -l < placement.txt) != $NNODES ]] || awk '$1 != 104 {bad=1} END {exit !bad}' placement.txt; then
@@ -139,14 +143,15 @@ run() {   # $1 arm (basic|bonus), $2 repeat
     cd "$CASE"
     cp "$TEAM/dicts/${NNODES}node/controlDict" system/controlDict
     cp "$ROOT/fvSolution.$a" system/fvSolution
-    local pre=()
+    local pre=() app=simpleFoam
     if [[ $a == bonus ]]; then
         echo "libs (\"$LIB\");" >> system/controlDict
-        pre=(-genv LD_PRELOAD "$FLIB:$RLIB" -genv FUSED_VECTOR_SOLVE_REPORT 1 -genv STEP_REUSE_REPORT 1)
+        pre=(-genv LD_PRELOAD "$FLIB:$RLIB" -genv FUSED_VECTOR_SOLVE_REPORT 1 -genv STEP_REUSE_REPORT 1 -genv SIMPLEFOAM_FUSED_REPORT 1)
+        app=$SFF
     fi
     cp system/controlDict system/fvSolution "$dir/"
     echo "RUN_START arm=$a repeat=$r utc=$(date -u +%FT%TZ)"
-    timeout --kill-after=30s 2400s mpirun -np $NP -ppn 104 "${glibcT[@]}" "${pre[@]}" simpleFoam -parallel "${fh[@]}" > "$dir/simpleFoam.log" 2>&1 || status=$?
+    timeout --kill-after=30s 2400s mpirun -np $NP -ppn 104 "${glibcT[@]}" "${pre[@]}" "$app" -parallel "${fh[@]}" > "$dir/simpleFoam.log" 2>&1 || status=$?
     if [[ -d postProcessing ]]; then mv postProcessing "$dir/"; fi
     cp "$ROOT/fvSolution.basic" system/fvSolution
     cp "$TEAM/dicts/${NNODES}node/controlDict" system/controlDict
@@ -163,6 +168,8 @@ run() {   # $1 arm (basic|bonus), $2 repeat
         grep -q 'stepReuse: convection: fused Gauss linearUpwindV' "$dir/simpleFoam.log"
         grep -q 'stepReuse: gaussGrad: interpolation fused' "$dir/simpleFoam.log"
         grep -q 'stepReuse: forceCoeffs: coefficient fields only with writeFields' "$dir/simpleFoam.log"
+        grep -q 'simpleFoamFused: momentum solve without matrix copy' "$dir/simpleFoam.log"
+        grep -q 'simpleFoamFused: pressure equation steps fused' "$dir/simpleFoam.log"
         grep -q 'stepReuse: wallShearStress: evaluated in write' "$dir/simpleFoam.log"
     fi
     local cd=$(awk '!/^#/ {last=$2} END {print last}' "$dir"/postProcessing/forceCoeffsAll/*/coefficient*.dat)
@@ -184,7 +191,7 @@ def cd(a, r):
     return rows[-1][1]
 both = 'basic' in arms and 'bonus' in arms
 out = [f'# Final runs, {nn} node(s) x 104 ranks, occDrivAerStaticMesh 65M, {steps} steps, {reps} repeat(s), arms: {" ".join(arms)}', '',
-       'basic = Basic tier; bonus = basic + fixedIterSolvers plugin + fused vector solve + stepReuse (LD_PRELOAD) + grad(p), grad(k), grad(omega) cache. Arms interleaved on the same nodes.', '',
+       'basic = Basic tier; bonus = basic + simpleFoamFused + fixedIterSolvers plugin + fused vector solve + stepReuse (LD_PRELOAD) + grad(p), grad(k), grad(omega) cache. Arms interleaved on the same nodes.', '',
        '| Repeat | ' + ' | '.join(f'{a} s/step' for a in arms) + (' | bonus vs basic' if both else '') + ' | ' + ' | '.join(f'Cd {a} (step {steps})' for a in arms) + ' | Cd check |',
        '|---:|' + '---:|' * (len(arms) * 2 + (1 if both else 0)) + ':---|']
 for r in range(1, reps + 1):
