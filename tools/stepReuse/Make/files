@@ -7,5 +7,6 @@ laplacianFused.C
 gradFused.C
 convectionFused.C
 forceCoeffsLazy.C
+cellLimitedGradFused.C
 
 LIB = /scratch/ya41/kn3896/openfoam/tools/stepReuse/lib/$(WM_OPTIONS)/libstepReuse

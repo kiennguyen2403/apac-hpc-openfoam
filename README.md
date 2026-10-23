@@ -142,12 +142,17 @@ One `LD_PRELOAD` library with three replacements, each bit-identical to stock Op
 - **forceCoeffs**: the two full-mesh coefficient fields are only computed with `writeFields` on; the written
   coefficients come from the summed patch forces (`execute()` is replaced too, since the library inlines
   `reset()` into it).
+- **cellLimited gradient of U** (`cellLimitedGrad<vector, minmod>::calcGrad`): the neighbour max/min is taken
+  in the Gauss gradient's face loop, max/min/limiter are initialised in one loop and the deltas max - U,
+  min - U are formed where the limiter uses them (stock: two copies, a separate max/min face loop, two
+  subtraction passes). Max, min and the limiter are min/max selections, exact in any order. −0.37% at 4
+  nodes (job 182137125), within noise; bit-identical.
 - **wallShearStress** function object: evaluated `devReff()` over the whole mesh every step but only
   writes at write time (never, in a benchmark run). `execute()` now defers to `write()`, which runs the
   stock `execute()` and `write()` (through `dlsym(RTLD_NEXT)`).
 
-Switch parts off with `STEP_REUSE_OFF=gs,komega,kfuse,divdev,lap,conv,grad,fco,wss`; `STEP_REUSE_REPORT=1`
-prints which path ran.
+Switch parts off with `STEP_REUSE_OFF=gs,komega,kfuse,divdev,lap,conv,grad,climit,fco,wss`;
+`STEP_REUSE_REPORT=1` prints which path ran.
 
 Also: `grad(k)` and `grad(omega)` in the fvSolution `cache` list. They are computed for `CDkOmega` and
 again by the corrected laplacian terms; the stock solution cache reuses them (no code needed), like
@@ -256,6 +261,7 @@ with node order and core order reversed. `tools/decompScore/analyse_imbalance.py
 | Cell-based `Amul` for p (`csrAmul`, cell loops suggested by Culpo, PRACE 2012) | bit-identical, 2.4% slower: the extra index lookup and per-step CSR rebuild cost more than the scattered writes it avoids (CuthillMcKee ordering keeps those writes in cache); a cell-based GaussSeidel was therefore not built |
 | `GAMGFused` (`tools/gamgFused`): copy of GAMG with the residual, restriction and finest-level scaling fused | bit-identical, +0.2% (noise): the fused cell loops are cheap next to the face loops |
 | Hybrid MPI + OpenMP | not built: all 104 cores per node already run a rank, v2512 has no OpenMP in the simpleFoam path, the GaussSeidel smoother is sequential; ceiling about the MPI share (~10%) |
+| Direct assembly of the omega and k equations (one face loop for convection, laplacian and correction, one cell loop for diagonal and source, instead of ~9 matrices combined pairwise) | bit-identical, +1.16% at 4 nodes (job 182136701): the face loop's scatter into three extra cell accumulators costs more than the streaming pairwise matrix operations it replaces |
 | Cp (`pressure` function object) evaluated at write only | not done: the patch probes sample `cp`, so deferring it is only correct because of the function-object order; ~0.15% |
 | Two GaussSeidel sweeps per pass over memory (second sweep trailing the first through a cache window) | not built: keeping the results exact needs processor-boundary cells last and a window of about two boundary layers; from the per-rank processor faces that is 2.2–4.2 MB for p and 4.5–8.8 MB for the fused U sweep per rank, larger than the 2 MB L2, and largest on the slowest ranks. A version that fits (current ordering, stale halo values in every second sweep) changes the smoother |
 | Two ranks per core (hyperthreading) | not available: a whole-node `normalsr` job's cpuset is `0-103`, one hyperthread per core |

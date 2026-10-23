@@ -31,6 +31,8 @@
 #           fields without writeFields (stepReuse lib_v2 = the build measured at 1.4242, job 181390148).
 #           Since job 182135600 (-2.72% at 4n, bit-identical) the bonus arm runs tools/simpleFoamFused
 #           (simpleFoam with fused momentum/pressure steps) instead of simpleFoam; basic runs simpleFoam.
+#           Since job 182137125 (-0.37% at 4n, within noise, bit-identical) stepReuse also fuses the
+#           cellLimited gradient of U (stepReuse lib_v3 = the build measured at 1.2675, job 182135721).
 #           (Job 181332282 ran bonus without the fused vector solve.)
 # Prepared cases (prep chain done once, reused): 1n vtune/drivaer_1node_icx_180728663/case,
 # 2n final/case208 (parallel prep done here on first use), 4n decomp-screen/case416_w05.
@@ -167,6 +169,7 @@ run() {   # $1 arm (basic|bonus), $2 repeat
         grep -q 'stepReuse: laplacian: fused Gauss linear assembly' "$dir/simpleFoam.log"
         grep -q 'stepReuse: convection: fused Gauss linearUpwindV' "$dir/simpleFoam.log"
         grep -q 'stepReuse: gaussGrad: interpolation fused' "$dir/simpleFoam.log"
+        grep -q 'stepReuse: cellLimitedGrad: limiter passes fused' "$dir/simpleFoam.log"
         grep -q 'stepReuse: forceCoeffs: coefficient fields only with writeFields' "$dir/simpleFoam.log"
         grep -q 'simpleFoamFused: momentum solve without matrix copy' "$dir/simpleFoam.log"
         grep -q 'simpleFoamFused: pressure equation steps fused' "$dir/simpleFoam.log"
