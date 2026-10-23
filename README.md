@@ -184,11 +184,13 @@ The laplacian, convection, gradient and forceCoeffs changes, on top of the setup
 | + convection, gradient, forceCoeffs | 1.3723 | −4.58% |
 | + laplacian | 1.3119 | −8.78% |
 
-## `tools/simpleFoamFused` — experimental, not yet run
+## `tools/simpleFoamFused` — experimental
 
 A modified `simpleFoam` (its momentum and pressure steps live in the solver executable, so they cannot be
-replaced by preloading). Intended to be bit-identical to `simpleFoam`; **not yet tested** (no identity test,
-no benchmark).
+replaced by preloading). Bit-identical to `simpleFoam` (box identity test, serial and 4 ranks: every field,
+solver line, wall shear stress and force coefficient; job 182135541). Paired, 4 nodes, 20 steps, same nodes,
+with the production libraries in both arms (job 182135600): `simpleFoam` 1.3453 s/step, `simpleFoamFused`
+1.3087 s/step (**−2.72%**), solver lines and force coefficients identical.
 
 - `solve(UEqn == -fvc::grad(p))` deep-copies the momentum matrix to add `V*(-grad(p))` to the source. Here
   that source is built separately and swapped into `UEqn` for the solve, then swapped back (the solve leaves
