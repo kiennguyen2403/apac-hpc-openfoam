@@ -16,7 +16,11 @@
 # Two arms per repeat, interleaved on the same nodes (basic, bonus, basic, bonus, ...):
 #   basic : Basic tier - team fvSolution (stock solvers), team decomposition (scotch; 2n/4n
 #           domains (N 104), domainWeights (1 0.5)), ICX OptSPR + Intel MPI, scatter pinning,
-#           tuned Allreduce file, glibcT malloc environment
+#           tuned Allreduce file, glibcT malloc environment, and (since job 182166167: -2.7% at 4n,
+#           bit-identical, transport only) UCX_ZCOPY_THRESH=inf UCX_RNDV_THRESH=inf: inter-node messages
+#           go through UCX's pre-registered buffers instead of registering solver buffers (zero-copy /
+#           rendezvous), which slowed the compute of ranks with off-node neighbours (~5 us per off-node
+#           face per step; jobs 182165344, 182165954)
 #   bonus : same + tools/fixedIterSolvers (smoothSolverFixed / PCGFixed via fvSolution solver
 #           names and controlDict libs) + tools/fusedVectorSolve (fused Ux/Uy/Uz GaussSeidel,
 #           mpirun -genv LD_PRELOAD) + "grad(p);" in the fvSolution cache block; bit-identical results,
@@ -33,6 +37,9 @@
 #           (simpleFoam with fused momentum/pressure steps) instead of simpleFoam; basic runs simpleFoam.
 #           Since job 182137125 (-0.37% at 4n, within noise, bit-identical) stepReuse also fuses the
 #           cellLimited gradient of U (stepReuse lib_v3 = the build measured at 1.2675, job 182135721).
+#           Since job 182180991 (-1.6% at 4n, bit-identical; box identity job 182180957) the bonus arm also
+#           preloads tools/compactAddr first: GaussSeidel and Amul read uint16 neighbour offsets and uint8
+#           faces-per-cell instead of int32 addressing (the time loop is memory-bandwidth bound, job 182171696).
 #           (Job 181332282 ran bonus without the fused vector solve.)
 # Prepared cases (prep chain done once, reused): 1n vtune/drivaer_1node_icx_180728663/case,
 # 2n final/case208 (parallel prep done here on first use), 4n decomp-screen/case416_w05.
@@ -51,6 +58,7 @@ LIB=/scratch/ya41/kn3896/openfoam/tools/fixedIterSolvers/lib/linux64IcxDPInt32Op
 FLIB=/scratch/ya41/kn3896/openfoam/tools/fusedVectorSolve/lib/linux64IcxDPInt32OptSPR/libfusedVectorSolve.so
 RLIB=/scratch/ya41/kn3896/openfoam/tools/stepReuse/lib/linux64IcxDPInt32OptSPR/libstepReuse.so
 SFF=/scratch/ya41/kn3896/openfoam/tools/simpleFoamFused/bin/linux64IcxDPInt32OptSPR/simpleFoamFused
+CALIB=/scratch/ya41/kn3896/openfoam/tools/compactAddr/lib/linux64IcxDPInt32OptSPR/libcompactAddr.so
 TIMER_SRC=$RES/vtune/drivaer_1node_icx_180728663/case/dynamicCode
 ROOT=$RES/final/runs_${NNODES}n_${PBS_JOBID%%.*}
 case $NNODES in
@@ -67,7 +75,7 @@ cd "$ROOT"
 [[ $(sort -u "$PBS_NODEFILE" | wc -l) == $NNODES ]]
 cp "$TEAM/run/${NNODES}node/intel-scatter-cpus.awk" "$TEAM/run/${NNODES}node/intelmpi-allreduce-${NNODES}n-104ppn-scatter.dat" .
 [[ $(sed -n 's/^endTime *\([0-9]*\);.*/\1/p' "$TEAM/dicts/${NNODES}node/controlDict") == $STEPS ]]
-[[ -f $LIB && -f $FLIB && -f $RLIB && -x $SFF ]]
+[[ -f $LIB && -f $FLIB && -f $RLIB && -f $CALIB && -x $SFF ]]
 for a in $ARMS; do [[ $a == basic || $a == bonus ]]; done
 grep -q '^End' "$LOGS/10_decomposePar.log"
 
@@ -125,13 +133,16 @@ export I_MPI_PIN_PROCESSOR_LIST
 unset I_MPI_ADJUST_ALLREDUCE I_MPI_ADJUST_ALLREDUCE_LIST I_MPI_TUNING_MODE
 export I_MPI_TUNING_BIN=$ROOT/intelmpi-allreduce-${NNODES}n-104ppn-scatter.dat
 glibcT=(-genv MALLOC_MMAP_THRESHOLD_ 33554432 -genv MALLOC_TRIM_THRESHOLD_ 4294967296 -genv MALLOC_TOP_PAD_ 268435456)
+ucxT=(-genv UCX_ZCOPY_THRESH inf -genv UCX_RNDV_THRESH inf)
 {
     echo "simpleFoam=$(command -v simpleFoam)"
     echo "compiler=$(icpx --version | head -1)"
     echo "mpi=$(mpirun --version 2>&1 | head -1)"
+    echo "ucx=$(ucx_info -v | head -1) env: ${ucxT[*]}"
     echo "plugin=$LIB sha256=$(sha256sum "$LIB" | cut -d' ' -f1)"
     echo "fused=$FLIB sha256=$(sha256sum "$FLIB" | cut -d' ' -f1)"
     echo "stepReuse=$RLIB sha256=$(sha256sum "$RLIB" | cut -d' ' -f1)"
+    echo "compactAddr=$CALIB sha256=$(sha256sum "$CALIB" | cut -d' ' -f1)"
     echo "simpleFoamFused=$SFF sha256=$(sha256sum "$SFF" | cut -d' ' -f1)"
 } > build-metadata.txt
 mpirun -np $NP -ppn 104 hostname | sort | uniq -c > placement.txt
@@ -148,12 +159,12 @@ run() {   # $1 arm (basic|bonus), $2 repeat
     local pre=() app=simpleFoam
     if [[ $a == bonus ]]; then
         echo "libs (\"$LIB\");" >> system/controlDict
-        pre=(-genv LD_PRELOAD "$FLIB:$RLIB" -genv FUSED_VECTOR_SOLVE_REPORT 1 -genv STEP_REUSE_REPORT 1 -genv SIMPLEFOAM_FUSED_REPORT 1)
+        pre=(-genv LD_PRELOAD "$CALIB:$FLIB:$RLIB" -genv FUSED_VECTOR_SOLVE_REPORT 1 -genv STEP_REUSE_REPORT 1 -genv SIMPLEFOAM_FUSED_REPORT 1)
         app=$SFF
     fi
     cp system/controlDict system/fvSolution "$dir/"
     echo "RUN_START arm=$a repeat=$r utc=$(date -u +%FT%TZ)"
-    timeout --kill-after=30s 2400s mpirun -np $NP -ppn 104 "${glibcT[@]}" "${pre[@]}" "$app" -parallel "${fh[@]}" > "$dir/simpleFoam.log" 2>&1 || status=$?
+    timeout --kill-after=30s 2400s mpirun -np $NP -ppn 104 "${glibcT[@]}" "${ucxT[@]}" "${pre[@]}" "$app" -parallel "${fh[@]}" > "$dir/simpleFoam.log" 2>&1 || status=$?
     if [[ -d postProcessing ]]; then mv postProcessing "$dir/"; fi
     cp "$ROOT/fvSolution.basic" system/fvSolution
     cp "$TEAM/dicts/${NNODES}node/controlDict" system/controlDict
@@ -163,7 +174,8 @@ run() {   # $1 arm (basic|bonus), $2 repeat
     [[ $(grep -c '^Time = ' "$dir/simpleFoam.log") == $STEPS ]]
     if [[ $a == bonus ]]; then
         grep -q 'fusedVectorSolve: U fused path (v3 folded copy)' "$dir/simpleFoam.log"
-        grep -q 'stepReuse: GaussSeidel: folded' "$dir/simpleFoam.log"
+        # the folded Gauss-Seidel runs in compactAddr (which replaces stepReuse's worker) or in stepReuse
+        grep -qE 'stepReuse: GaussSeidel: folded|compactAddr: GaussSeidel: 16-bit neighbour offsets, folded source copy' "$dir/simpleFoam.log"
         grep -q 'stepReuse: kOmegaSST: shared divU and k/omega convection, fused per-cell maths' "$dir/simpleFoam.log"
         grep -q 'stepReuse: divDevReff: fused explicit term' "$dir/simpleFoam.log"
         grep -q 'stepReuse: laplacian: fused Gauss linear assembly' "$dir/simpleFoam.log"
@@ -174,6 +186,8 @@ run() {   # $1 arm (basic|bonus), $2 repeat
         grep -q 'simpleFoamFused: momentum solve without matrix copy' "$dir/simpleFoam.log"
         grep -q 'simpleFoamFused: pressure equation steps fused' "$dir/simpleFoam.log"
         grep -q 'stepReuse: wallShearStress: evaluated in write' "$dir/simpleFoam.log"
+        grep -q 'compactAddr: GaussSeidel: 16-bit neighbour offsets' "$dir/simpleFoam.log"
+        grep -q 'compactAddr: Amul: 16-bit neighbour offsets' "$dir/simpleFoam.log"
     fi
     local cd=$(awk '!/^#/ {last=$2} END {print last}' "$dir"/postProcessing/forceCoeffsAll/*/coefficient*.dat)
     echo "RUN_SUCCESS arm=$a repeat=$r Cd_step$STEPS=$cd $(grep 'Average wall-clock time per time step' "$dir/simpleFoam.log" | tail -1)"
@@ -194,7 +208,7 @@ def cd(a, r):
     return rows[-1][1]
 both = 'basic' in arms and 'bonus' in arms
 out = [f'# Final runs, {nn} node(s) x 104 ranks, occDrivAerStaticMesh 65M, {steps} steps, {reps} repeat(s), arms: {" ".join(arms)}', '',
-       'basic = Basic tier; bonus = basic + simpleFoamFused + fixedIterSolvers plugin + fused vector solve + stepReuse (LD_PRELOAD) + grad(p), grad(k), grad(omega) cache. Arms interleaved on the same nodes.', '',
+       'basic = Basic tier; bonus = basic + simpleFoamFused + fixedIterSolvers plugin + fused vector solve + stepReuse + compactAddr (LD_PRELOAD) + grad(p), grad(k), grad(omega) cache. Arms interleaved on the same nodes.', '',
        '| Repeat | ' + ' | '.join(f'{a} s/step' for a in arms) + (' | bonus vs basic' if both else '') + ' | ' + ' | '.join(f'Cd {a} (step {steps})' for a in arms) + ' | Cd check |',
        '|---:|' + '---:|' * (len(arms) * 2 + (1 if both else 0)) + ':---|']
 for r in range(1, reps + 1):

@@ -11,11 +11,18 @@
     does not reproduce decomposePar for scotch: state left by one scotch run
     changes the next result.
 
-    Usage: decompScore -candidates <file: "name dictPath" per line>
+    Usage: decompScore -candidates <file: "name dictPath [A B C]" per line>
                        -outDir <dir> [-ranksPerNode 104] [-nParallel 1]
     Output: <outDir>/<name>.ranks with columns
             rank cells procFaces bndFaces neighbours offNodeFaces
             internalFaces wallFaces wallCells
+
+    With "A B C" the candidate is decomposed with cell weights
+        w = A*(internal faces of the cell) + B*(wall faces of the cell) + C,
+    rounded with a golden-ratio dither, cell 0 set to 1 and every weight >= 1:
+    the integer weights cellWeights -mode linear writes for decomposePar's
+    weightField (identical formula), so the result is the decomposition
+    decomposePar would make with that field.
 \*---------------------------------------------------------------------------*/
 
 #include "argList.H"
@@ -30,8 +37,51 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <map>
+#include <cmath>
+#include <sstream>
 
 using namespace Foam;
+
+// Integer cell weights, as cellWeights -mode linear
+static scalarField linearCellWeights
+(
+    const polyMesh& mesh,
+    const scalar A,
+    const scalar B,
+    const scalar C
+)
+{
+    const labelList& own = mesh.faceOwner();
+    const labelList& nei = mesh.faceNeighbour();
+    const label nCells = mesh.nCells();
+
+    scalarField nInt(nCells, Zero);
+    scalarField nWall(nCells, Zero);
+    for (label facei = 0; facei < mesh.nInternalFaces(); ++facei)
+    {
+        nInt[own[facei]] += 1;
+        nInt[nei[facei]] += 1;
+    }
+    for (const polyPatch& pp : mesh.boundaryMesh())
+    {
+        if (isA<wallPolyPatch>(pp))
+        {
+            forAll(pp, i) { nWall[own[pp.start() + i]] += 1; }
+        }
+    }
+
+    const scalar phi = 0.6180339887498949;
+    scalarField w(nCells);
+    forAll(w, celli)
+    {
+        const scalar x = A*nInt[celli] + B*nWall[celli] + C;
+        const scalar u = (celli*phi) - std::floor(celli*phi);
+        w[celli] = std::floor(x + u);
+        if (w[celli] < 1) w[celli] = 1;
+    }
+    w[0] = 1;
+    return w;
+}
 
 // Decompose with one candidate dictionary and write its per-rank table
 static void scoreCandidate
@@ -41,7 +91,8 @@ static void scoreCandidate
     const word& name,
     const fileName& dictPath,
     const fileName& outDir,
-    const label ranksPerNode
+    const label ranksPerNode,
+    const scalarField* weightCoeffs
 )
 {
     const labelList& own = mesh.faceOwner();
@@ -53,7 +104,24 @@ static void scoreCandidate
     IFstream dis(dictPath);
     dictionary dict(dis);
     autoPtr<decompositionMethod> method = decompositionMethod::New(dict);
-    const labelList cellToProc(method->decompose(mesh, cc));
+    labelList cellToProc;
+    if (weightCoeffs)
+    {
+        const scalarField w
+        (
+            linearCellWeights
+            (
+                mesh, (*weightCoeffs)[0], (*weightCoeffs)[1], (*weightCoeffs)[2]
+            )
+        );
+        Info<< "CANDIDATE_WEIGHTS " << name << " min " << min(w) << " max " << max(w)
+            << " mean " << average(w) << " sum " << sum(w) << endl;
+        cellToProc = method->decompose(mesh, cc, w);
+    }
+    else
+    {
+        cellToProc = method->decompose(mesh, cc);
+    }
     const label n = method->nDomains();
     const scalar tDecomp = timer.timeIncrement();
 
@@ -101,7 +169,13 @@ static void scoreCandidate
     label maxCells = 0, maxProc = 0, maxNbr = 0, totProc = 0;
     {
         OFstream os(outDir/name + ".ranks");
-        os  << "# candidate " << name << " dict " << dictPath << nl
+        os  << "# candidate " << name << " dict " << dictPath;
+        if (weightCoeffs)
+        {
+            os  << " weights A " << (*weightCoeffs)[0] << " B " << (*weightCoeffs)[1]
+                << " C " << (*weightCoeffs)[2];
+        }
+        os  << nl
             << "# rank cells procFaces bndFaces neighbours offNodeFaces"
                " internalFaces wallFaces wallCells" << nl;
         for (label proci = 0; proci < n; ++proci)
@@ -127,7 +201,7 @@ static void scoreCandidate
 int main(int argc, char *argv[])
 {
     argList::noParallel();
-    argList::addOption("candidates", "file", "List of 'name dictPath' lines");
+    argList::addOption("candidates", "file", "List of 'name dictPath [A B C]' lines");
     argList::addOption("outDir", "dir", "Directory for <name>.ranks files");
     argList::addOption("ranksPerNode", "label", "Ranks per node (default 104)");
     argList::addOption("nParallel", "label", "Candidates decomposed concurrently (default 1)");
@@ -151,16 +225,24 @@ int main(int argc, char *argv[])
 
     DynamicList<word> names;
     DynamicList<fileName> dicts;
+    PtrList<scalarField> coeffs;
     {
         IFstream cis(candFile);
         std::string line;
         while (cis.good() && cis.getLine(line))
         {
             if (line.empty() || line[0] == '#') continue;
-            const auto sp = line.find_first_of(" \t");
-            if (sp == std::string::npos) continue;
-            names.push_back(word(line.substr(0, sp)));
-            dicts.push_back(fileName(line.substr(line.find_first_not_of(" \t", sp))));
+            std::istringstream iss(line);
+            std::string nm, dp;
+            if (!(iss >> nm >> dp)) continue;
+            names.push_back(word(nm));
+            dicts.push_back(fileName(dp));
+            double a, b, c;
+            coeffs.resize(names.size());
+            if (iss >> a >> b >> c)
+            {
+                coeffs.set(names.size() - 1, new scalarField({a, b, c}));
+            }
         }
     }
 
@@ -192,7 +274,11 @@ int main(int argc, char *argv[])
         }
         if (pid == 0)
         {
-            scoreCandidate(mesh, cc, names[i], dicts[i], outDir, ranksPerNode);
+            scoreCandidate
+            (
+                mesh, cc, names[i], dicts[i], outDir, ranksPerNode,
+                coeffs.set(i) ? &coeffs[i] : nullptr
+            );
             std::cout.flush();
             ::_exit(0);
         }

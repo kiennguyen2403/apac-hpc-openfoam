@@ -1,0 +1,3 @@
+gamgCensus.C
+
+LIB = /scratch/ya41/kn3896/openfoam/tools/gamgCensus/lib/$(WM_OPTIONS)/libgamgCensus

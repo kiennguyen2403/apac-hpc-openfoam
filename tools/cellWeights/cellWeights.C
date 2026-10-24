@@ -5,6 +5,9 @@
     -mode faces:    w = 4*(internal faces of the cell) + 7*(wall faces of the cell)
                     (fitted per-rank cost: ~7.5 us per internal face, shared by
                     two cells, and ~6.5 us extra per wall face; job 181351948)
+    -mode linear:   w = A*(internal faces of the cell) + B*(wall faces of the cell)
+                    + C (-A -B -C), dithered; the formula decompScore uses for
+                    "name dict A B C" candidates
     -mode measured: w = faces-weight * f_r, where r is the cell's rank in an
                     existing decomposition (-dict) and f_r = (measured cost of r
                     / faces-weight of r), normalised by the median over ranks
@@ -15,7 +18,8 @@
     weights (measured mode) are rounded with a golden-ratio dither, so sums
     over many cells are unbiased.
 
-    Usage: cellWeights -mode faces|measured [-dict decomposeParDict -costs file]
+    Usage: cellWeights -mode faces|linear|measured [-A a -B b -C c]
+                       [-dict decomposeParDict -costs file]
                        [-name cellWeight]
 \*---------------------------------------------------------------------------*/
 
@@ -33,7 +37,10 @@ using namespace Foam;
 int main(int argc, char *argv[])
 {
     argList::noParallel();
-    argList::addOption("mode", "word", "faces | measured");
+    argList::addOption("mode", "word", "faces | linear | measured");
+    argList::addOption("A", "scalar", "linear: weight per internal face of the cell");
+    argList::addOption("B", "scalar", "linear: weight per wall face of the cell");
+    argList::addOption("C", "scalar", "linear: weight per cell (default 0)");
     argList::addOption("dict", "file", "decomposeParDict of the measured decomposition");
     argList::addOption("costs", "file", "per-rank measured cost: 'rank cost' lines");
     argList::addOption("name", "word", "field name (default cellWeight)");
@@ -121,6 +128,36 @@ int main(int argc, char *argv[])
             const scalar u = (celli*phi) - std::floor(celli*phi);
             w[celli] = std::floor(x + u);
         }
+    }
+    else if (mode == "linear")
+    {
+        const scalar A = args.get<scalar>("A");
+        const scalar B = args.get<scalar>("B");
+        const scalar C = args.getOrDefault<scalar>("C", 0);
+
+        scalarField nInt(nCells, Zero);
+        scalarField nWallC(nCells, Zero);
+        for (label facei = 0; facei < mesh.nInternalFaces(); ++facei)
+        {
+            nInt[own[facei]] += 1;
+            nInt[nei[facei]] += 1;
+        }
+        for (const polyPatch& pp : mesh.boundaryMesh())
+        {
+            if (isA<wallPolyPatch>(pp))
+            {
+                forAll(pp, i) { nWallC[own[pp.start() + i]] += 1; }
+            }
+        }
+
+        const scalar phi = 0.6180339887498949;
+        forAll(w, celli)
+        {
+            const scalar x = A*nInt[celli] + B*nWallC[celli] + C;
+            const scalar u = (celli*phi) - std::floor(celli*phi);
+            w[celli] = std::floor(x + u);
+        }
+        Info<< "linear: A " << A << " B " << B << " C " << C << endl;
     }
     else if (mode != "faces")
     {

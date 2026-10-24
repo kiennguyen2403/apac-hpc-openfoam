@@ -1,0 +1,7 @@
+EXE_INC = \
+    -I/scratch/ya41/kn3896/openfoam/tools/compactAddr \
+    -I$(LIB_SRC)/finiteVolume/lnInclude \
+    -I$(LIB_SRC)/meshTools/lnInclude
+
+LIB_LIBS = \
+    -lfiniteVolume

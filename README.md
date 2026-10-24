@@ -15,11 +15,21 @@ built with Intel oneAPI ICX 2025.3 and Intel MPI 2021.17.
 | Bonus: + `stepReuse`, `fixedIterSolvers` v2, `fusedVectorSolve` v3, cache `grad(p)`, `grad(k)`, `grad(omega)` | 1.4815 | −25.0% | identical |
 | Bonus: + `stepReuse` divDevReff and kOmegaSST per-cell fusion | 1.4242 | −27.9% | identical |
 | Bonus: + `stepReuse` laplacian, convection, gradient fusion, lazy forceCoeffs fields | 1.3060 | −33.9% | identical |
-| **Bonus: + `simpleFoamFused`** | **1.2675** | **−35.9%** | identical |
+| Bonus: + `simpleFoamFused` | 1.2675 | −35.9% | identical |
+| Bonus: + fused cellLimited gradient, UCX zero-copy/rendezvous off | 1.2580 | −36.4% | identical |
+| **Bonus: + `compactAddr`** | **1.2358** | **−37.5%** | identical |
 
 Basic and the first Bonus row ran in the same job (181332282); the v1 and v2 rows are separate jobs
-(181334343, 181363792, 181376794, 181390148, 181413566, 182135721), each checked against the same Cd. Both solver changes are bit-identical to stock OpenFOAM: every solver log line, field and force
+(181334343, 181363792, 181376794, 181390148, 181413566, 182135721, 182166454, 182182107), each checked against the
+same Cd. The Basic row predates the UCX setting (both arms of `scripts/final/final_runs.sh` now use it). Both solver changes are bit-identical to stock OpenFOAM: every solver log line, field and force
 coefficient matches.
+
+2 and 1 nodes (current setup, Basic and Bonus in the same job, Cd bit-identical):
+
+| Configuration | Basic s/step | Bonus s/step | vs Basic | Cd |
+|---|---:|---:|---:|---|
+| 2 nodes × 104, 80 steps (job 182181634) | 4.0081 | 2.5402 | −36.6% | 0.33772590153571347 |
+| 1 node × 104, 40 steps (job 182181635) | 8.1711 | 5.2129 | −36.2% | 0.43805628753637488 |
 
 ## `tools/fixedIterSolvers` — solver plugin (main result)
 
@@ -214,6 +224,34 @@ snGrad; `SIMPLEFOAM_FUSED_OFF=1` forces the stock code. Prepared: `identity_test
 `scripts/profile/compiler/sff_4node.sh` (4 nodes, `simpleFoam` vs `simpleFoamFused`). The bonus arm of
 `scripts/final/final_runs.sh` runs `simpleFoamFused`.
 
+## `tools/compactAddr` — compact solver addressing
+
+The time loop is memory-bandwidth bound (see *Memory roofline*), so the Gauss-Seidel smoother and `Amul`
+read less addressing: `compactAddr` (LD_PRELOAD, **first** in the list) replaces
+`GaussSeidelSmoother::smooth` (keeping `stepReuse`'s folded source copy) and `lduMatrix::Amul`. Per ldu level
+(cached by `lduAddressing` pointer, `compactAddressing.H`) it stores the neighbour as a `uint16` offset from
+the owner and the faces per cell as `uint8`, instead of `int32` `upperAddr`/`ownerStartAddr`; `Amul` no longer
+reads `lowerAddr` (faces are owner-ordered, so the owner is the cell whose face range is walked). Faces are
+visited in increasing index with the same statements, so results are bit-identical (box identity test, serial and
+4 ranks, full production setup: job 182180957). Levels that do not fit fall back to the next definition;
+`STEP_REUSE_OFF=compact` disables it.
+
+Paired, 4 nodes, 20 steps, 3 repeats in fixed order (job 182180991): 1.2652 → 1.2451 s/step (**−1.6%**, every
+compact run faster than every baseline run, pressure residuals identical). The same compaction inside the fused U
+solve (`tools/fusedVectorSolve/v4build`, job 182181441) gave −0.15% (noise): the fused solve already reads the
+addressing once for three components. Production keeps `fusedVectorSolve` v3.
+
+## Memory roofline (`tools/memBandwidth`)
+
+`scripts/profile/compiler/membw_1node.sh` (1 node, steps 2–12, `perf stat -I 1000` user-mode counters on every
+rank; VTune's microarchitecture analysis needs a sampling driver that Gadi does not load):
+
+- STREAM triad on all 104 cores (`stream_triad.c`): **492 GB/s** per node.
+- The solver streams **353 GB/s** into L2 (72% of STREAM, MPI time included; 86% of the time at 300–425 GB/s),
+  1.9 TB per step = 29 KB per cell per step.
+- 71.8% of cycles have ≥4 data reads outstanding (bandwidth-limited), 5.2% have 1–3 (latency-limited).
+- DTLB page walks: 1.2% of cycles, so huge pages cannot help.
+
 ## `tools/decompScore` — decomposition screening
 
 - `decompScore` (OpenFOAM utility): reads the mesh once, then forks one child per candidate
@@ -248,6 +286,20 @@ with node order and core order reversed. `tools/decompScore/analyse_imbalance.py
   cell-based (gather) loop. `losort` is stable, so this is bit-identical.
 - `tools/smtprobe` + `smt_probe_1node.sh`: checks whether a second rank per core (hyperthread) can be used.
 
+Root cause, found with `tools/gamgCensus` (LD_PRELOAD timing wrappers, per rank: GAMG levels, step phases,
+MPI time, neighbours, rusage; `analyse_*.py`):
+
+- GAMG coarse levels are balanced in size; their face counts and the processor interfaces vary, and the pressure
+  solve explains only 28–39% of the per-rank variance. A common per-rank efficiency factor slows every loop on
+  some ranks. Not locality (CuthillMcKee band ~10k cells), not denormals (FTZ/DAZ bit-identical, zero FP assists,
+  job 182140425).
+- Extra L3 misses track off-node processor faces. Shifting the rank-to-node mapping by 52 (job 182165344)
+  moved the slowdown with the off-node faces: ~5 µs per off-node face per step, inside loops without MPI calls.
+- UCX registered the solver's buffers for zero-copy/rendezvous transfers to other nodes.
+  `UCX_ZCOPY_THRESH=inf UCX_RNDV_THRESH=inf` (eager copies through UCX's pre-registered buffers) removed the
+  penalty (job 182165954: MPI 257 → 213 ms/step, voluntary context switches 11 → 0.3 per step) and gave
+  **−2.7%** within one job (3 repeats, job 182166167), bit-identical. Both arms of `final_runs.sh` use it.
+
 ## Tried and rejected
 
 | Change | Result |
@@ -265,6 +317,13 @@ with node order and core order reversed. `tools/decompScore/analyse_imbalance.py
 | Cp (`pressure` function object) evaluated at write only | not done: the patch probes sample `cp`, so deferring it is only correct because of the function-object order; ~0.15% |
 | Two GaussSeidel sweeps per pass over memory (second sweep trailing the first through a cache window) | not built: keeping the results exact needs processor-boundary cells last and a window of about two boundary layers; from the per-rank processor faces that is 2.2–4.2 MB for p and 4.5–8.8 MB for the fused U sweep per rank, larger than the 2 MB L2, and largest on the slowest ranks. A version that fits (current ordering, stale halo values in every second sweep) changes the smoother |
 | Two ranks per core (hyperthreading) | not available: a whole-node `normalsr` job's cpuset is `0-103`, one hyperthread per core |
+| GAMG processor agglomeration (masterCoarsest 104/26, procFaces 50/400), current setup | +0.80% / −0.24% / −0.49% / +0.47%: noise, and not bit-identical |
+| Weighted scotch v2 (`decompScore` candidates `name dict A B C`, w = A·internal + B·wall + C) | every candidate predicted 2.6–8.1% slower: weights inflate max processor faces 24k → 33–48k |
+| KaHIP tuning (strong/eco imbalance 0.3% / 0.1%, cell weights, flat 416-way, fast) scored by `decompScore` + census cost model | best variants equal scotch on the slowest rank; the team partition measured −0.4..−0.9% but moves Cd −0.45% at step 20 |
+| UCX transports (RC, DC, legacy protocols) and HCOLL/SHARP | within ±0.6% (noise); HCOLL/SHARP did not engage |
+| Compact pinning / rank reordering to keep halos within a socket | with the UCX setting, cross-socket faces cost the same as same-socket faces (census fit) |
+| Huge pages for the heap | page walks are 1.2% of cycles; jemalloc with THP was −2.5% on one node, +92% on another |
+| Compact addressing in the fused U solve (`fusedVectorSolve` v4) | bit-identical, −0.15% (noise) |
 
 ## `scripts/` and `wmake-rules/`
 
