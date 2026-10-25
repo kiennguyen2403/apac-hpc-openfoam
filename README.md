@@ -31,6 +31,22 @@ coefficient matches.
 | 2 nodes × 104, 80 steps (job 182181634) | 4.0081 | 2.5402 | −36.6% | 0.33772590153571347 |
 | 1 node × 104, 40 steps (job 182181635) | 8.1711 | 5.2129 | −36.2% | 0.43805628753637488 |
 
+**Contest addendum (2026-09-25) compliance.** The addendum keeps `fvSolution.fixedIter`, `fvSchemes` and
+`controlDict.noWrite` (including its function objects) as shipped in every tier, and limits the Basic case edits
+to `nCores`, `decompositionMethod`, `nHierarchical`, the method's coefficients and `endTime`. The numbers above
+used the team's `controlDict` (`runTimeModifiable no`), and the Bonus arm also renamed solvers and extended the
+cache in `fvSolution` and deferred two function objects. Status:
+
+- `scripts/final/final_runs.sh` now builds `controlDict` from the shipped `controlDict.noWrite` (only `endTime`
+  changed) and stops if `fvSolution.fixedIter`, `fvSchemes` or `controlDict.noWrite` differ from the shipped case,
+  or if `caseDefinition` differs outside `nCores` / `decompositionMethod` / `nHierarchical` (the scotch
+  `domains` / `domainWeights` now sit in `decomposeParDict`'s `scotchCoeffs`).
+- **Compliant Basic, 4 nodes × 150 steps: 1.9341 s/step** (job 182187466, one run, with the UCX setting),
+  Cd 0.28738062413153675, identical to the earlier Basic.
+- Re-enabling the deferred `wallShearStress` and `forceCoeffs` fields costs +2.23% in the Bonus arm (job
+  182232191). Moving the fixed-iteration and cache switches from `fvSolution` into the preloaded libraries, and
+  the compliant Bonus finals, are still to do.
+
 ## `tools/fixedIterSolvers` — solver plugin (main result)
 
 With fixed-iteration controls (`tolerance 0; relTol 0;` plus `maxIter`), convergence can
@@ -251,6 +267,23 @@ rank; VTune's microarchitecture analysis needs a sampling driver that Gadi does 
   1.9 TB per step = 29 KB per cell per step.
 - 71.8% of cycles have ≥4 data reads outstanding (bandwidth-limited), 5.2% have 1–3 (latency-limited).
 - DTLB page walks: 1.2% of cycles, so huge pages cannot help.
+- Store traffic (`rfo_1node.sh`, `analyse_rfo.py`): demand read-for-ownership misses are 9.4% of the L2 fills and
+  demand RFOs sent beyond L2 12.1% (lower bounds of what streaming stores could save); dirty write-backs equal
+  99% of the fills (upper bound).
+
+## Performance models (`tools/perfModel`)
+
+Built from the per-rank census (no new runs); details and outputs in `tools/perfModel/README.md`.
+
+- `bandwidth_model.py`: kernel time proportional to the bytes it moves, bytes counted from the loops, nothing
+  fitted. Against seven A/B results it gets 6 of 7 decisions right; the miss is `GaussSeidelNoCopy`, which saves
+  the same bytes as the later folded copy but adds a branch per face. It over-predicts pure layout changes by
+  1.1–1.7× and explains 60–75% of the fixed-iteration gain.
+- `critical_path.py`: a step is 79% average (bandwidth-bound) compute, 5.0% whole-step imbalance, ≥4.7%
+  per-segment imbalance and ≤11.2% communication, so perfect partitioning could save at most 9.7% and
+  free communication at most 11.2%.
+- Forward prediction, recorded before the run: re-enabling the deferred function objects costs +1.15 .. +2.04%;
+  measured +2.23% (job 182232191, one repeat), consistent within noise.
 
 ## `tools/decompScore` — decomposition screening
 
@@ -324,6 +357,7 @@ MPI time, neighbours, rusage; `analyse_*.py`):
 | Compact pinning / rank reordering to keep halos within a socket | with the UCX setting, cross-socket faces cost the same as same-socket faces (census fit) |
 | Huge pages for the heap | page walks are 1.2% of cycles; jemalloc with THP was −2.5% on one node, +92% on another |
 | Compact addressing in the fused U solve (`fusedVectorSolve` v4) | bit-identical, −0.15% (noise) |
+| `stepReuse` deferral of `wallShearStress` to write time and of the `forceCoeffs` coefficient fields | output identical, but the work is skipped; dropped for addendum compliance (function objects are part of the defined work), costs +2.23% |
 
 ## `scripts/` and `wmake-rules/`
 

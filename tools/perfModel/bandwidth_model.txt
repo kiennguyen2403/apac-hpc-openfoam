@@ -1,0 +1,22 @@
+census: 412 ranks (I/O ranks excluded), 9 steps, 1.3160 s/step with census on
+achieved bandwidth per rank, mean over ranks (GB/s; r = 0 .. 24 B/cell re-read):
+  finest Amul                 5.90 ..  7.26   x104 ranks =  613 ..  755 GB/s per node (STREAM 492)
+  k/omega solves              4.64 ..  4.83   x104 ranks =  483 ..  503 GB/s per node (STREAM 492)
+  U solve                     3.57 ..  3.73   x104 ranks =  371 ..  387 GB/s per node (STREAM 492)
+  finest GAMG Gauss-Seidel    6.58 ..  6.58   x104 ranks =  685 ..  685 GB/s per node (STREAM 492)
+
+| Idea | A/B | measured | predicted (all ranks) | predicted (20 slowest ranks) | verdict |
+|---|---|---:|---:|---:|---|
+| Fixed-iteration solvers | `fixediter/drivaer_4node_181329240` | -16.34% | -12.09 .. -9.38% (bytes -8.7..-9.0%, syncs -0.7%, waits at removed syncs up to -2.5%) | -12.09 .. -9.38% | direction right, size off |
+| Fused Ux/Uy/Uz Gauss-Seidel | `fusedu/drivaer_4node_181333833` | -3.77% | -5.33 .. -5.11% | -5.43 .. -5.20% | direction right, size off |
+| Folded Gauss-Seidel copy | `stepreuse/bench_4node_181376795` | -0.96% | -1.06 .. -1.04% | -1.14 .. -1.12% | hit | difference of two bundle arms
+| Compact addressing (GS + Amul) | `compact/ab_4node_182180991` | -1.59% | -2.72 .. -2.46% | -2.92 .. -2.65% | direction right, size off | mean of 3 repeats
+| Compact addressing in fused U | `compact/fusedu4_ab_4node_182181441` | -0.15% | -0.48 .. -0.46% | -0.48 .. -0.46% | hit | mean of 3 repeats
+| GaussSeidelNoCopy (branchy) | `gsnocopy/drivaer_1node_181331034` | +2.76% | -2.26 .. -2.20% | -2.40 .. -2.33% | MISS | 1-node A/B; prediction in % at 4n rates
+| Cell-based Amul (gather) | `csramul/bench_4node_181362805` | +2.43% | -0.02 .. +0.96% | -0.03 .. +1.01% | direction right, size off |
+
+forward prediction (written before any measurement): cost of re-enabling the deferred
+function objects in the Bonus arm, 4 nodes, vs 1.2358 s/step:
+  wallShearStress      +  9.0 .. + 17.3 ms/step   +0.73 .. +1.40%
+  forceCoeffs fields   +  5.2 .. +  8.0 ms/step   +0.42 .. +0.64%
+  both                 + 14.2 .. + 25.2 ms/step   +1.15 .. +2.04%

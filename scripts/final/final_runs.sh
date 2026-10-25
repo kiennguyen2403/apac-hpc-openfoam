@@ -12,7 +12,11 @@
 #   qsub -l ncpus=208,mem=400gb -v NNODES=2,REPEATS=1 final_runs.sh
 #   qsub -l ncpus=104,mem=400gb -v NNODES=1,REPEATS=1 final_runs.sh
 # Optional: ARMS="bonus" (default "basic bonus"); REF_CD=<Cd of a basic run> to check a bonus-only job.
-# Steps: the team's controlDict for that node count, unchanged (1n 40, 2n 80, 4n 150).
+# Steps (Addendum 2026-09-25, F1): the shipped controlDict.noWrite with only endTime changed
+# (1n 40, 2n 80, 4n 150); fvSolution.fixedIter, fvSchemes and controlDict.noWrite must match the
+# shipped case, and caseDefinition may differ from it only in nCores / decompositionMethod /
+# nHierarchical (scotch domains/domainWeights live in decomposeParDict scotchCoeffs).
+# (Jobs before 2026-10-24 used the team's controlDict, which also set runTimeModifiable no.)
 # Two arms per repeat, interleaved on the same nodes (basic, bonus, basic, bonus, ...):
 #   basic : Basic tier - team fvSolution (stock solvers), team decomposition (scotch; 2n/4n
 #           domains (N 104), domainWeights (1 0.5)), ICX OptSPR + Intel MPI, scatter pinning,
@@ -52,6 +56,7 @@ ARMS=${ARMS:-basic bonus}
 REF_CD=${REF_CD:-}
 NP=$((NNODES * 104))
 TEAM=/scratch/ya41/apac-2026/openfoam
+SHIP=$TEAM/run/case/occDrivAerStaticMesh
 FOAM=/scratch/ya41/kn3896/openfoam/OpenFOAM-v2512
 RES=/scratch/ya41/kn3896/openfoam/contest-results
 LIB=/scratch/ya41/kn3896/openfoam/tools/fixedIterSolvers/lib/linux64IcxDPInt32OptSPR/libfixedIterSolvers.so
@@ -70,11 +75,19 @@ esac
 
 mkdir -p "$ROOT"
 exec > >(tee "$ROOT/job.log") 2>&1
-trap 'echo "FINAL_FAILED line=$LINENO status=$?"; [[ -f $ROOT/fvSolution.basic ]] && cp "$ROOT/fvSolution.basic" "$CASE/system/fvSolution"; cp "$TEAM/dicts/${NNODES}node/controlDict" "$CASE/system/controlDict" 2>/dev/null || true' ERR
+trap 'echo "FINAL_FAILED line=$LINENO status=$?"; [[ -f $ROOT/fvSolution.basic ]] && cp "$ROOT/fvSolution.basic" "$CASE/system/fvSolution"; cp "$ROOT/controlDict.run" "$CASE/system/controlDict" 2>/dev/null || true' ERR
 cd "$ROOT"
 [[ $(sort -u "$PBS_NODEFILE" | wc -l) == $NNODES ]]
 cp "$TEAM/run/${NNODES}node/intel-scatter-cpus.awk" "$TEAM/run/${NNODES}node/intelmpi-allreduce-${NNODES}n-104ppn-scatter.dat" .
-[[ $(sed -n 's/^endTime *\([0-9]*\);.*/\1/p' "$TEAM/dicts/${NNODES}node/controlDict") == $STEPS ]]
+# Case files against the shipped case (Addendum F1)
+for f in controlDict.noWrite fvSolution.fixedIter fvSchemes; do cmp "$SHIP/system/$f" "$CASE/system/$f"; done
+bad=$(diff "$SHIP/system/include/caseDefinition" "$CASE/system/include/caseDefinition" | grep '^[<>]' | grep -vE '^[<>] (nCores|decompositionMethod|nHierarchical)\s' || true)
+[[ -z $bad ]] || { echo "caseDefinition differs from the shipped case outside nCores/decompositionMethod/nHierarchical:"; echo "$bad"; false; }
+sed -E "s/^(endTime\s+)[0-9]+;/\1$STEPS;/" "$SHIP/system/controlDict.noWrite" > controlDict.run
+[[ $(diff "$SHIP/system/controlDict.noWrite" controlDict.run | grep -c '^[<>]') == 2 ]]
+for f in include/caseDefinition decomposeParDict; do echo "== $f: shipped vs case"; diff "$SHIP/system/$f" "$CASE/system/$f" || true; done > compliance.txt
+echo "== controlDict: shipped controlDict.noWrite vs run" >> compliance.txt
+diff "$SHIP/system/controlDict.noWrite" controlDict.run >> compliance.txt || true
 [[ -f $LIB && -f $FLIB && -f $RLIB && -f $CALIB && -x $SFF ]]
 for a in $ARMS; do [[ $a == basic || $a == bonus ]]; done
 grep -q '^End' "$LOGS/10_decomposePar.log"
@@ -154,7 +167,7 @@ run() {   # $1 arm (basic|bonus), $2 repeat
     local a=$1 r=$2 dir=$ROOT/run_$1_$2 status=0
     mkdir "$dir"
     cd "$CASE"
-    cp "$TEAM/dicts/${NNODES}node/controlDict" system/controlDict
+    cp "$ROOT/controlDict.run" system/controlDict
     cp "$ROOT/fvSolution.$a" system/fvSolution
     local pre=() app=simpleFoam
     if [[ $a == bonus ]]; then
@@ -167,7 +180,7 @@ run() {   # $1 arm (basic|bonus), $2 repeat
     timeout --kill-after=30s 2400s mpirun -np $NP -ppn 104 "${glibcT[@]}" "${ucxT[@]}" "${pre[@]}" "$app" -parallel "${fh[@]}" > "$dir/simpleFoam.log" 2>&1 || status=$?
     if [[ -d postProcessing ]]; then mv postProcessing "$dir/"; fi
     cp "$ROOT/fvSolution.basic" system/fvSolution
-    cp "$TEAM/dicts/${NNODES}node/controlDict" system/controlDict
+    cp "$ROOT/controlDict.run" system/controlDict
     cd "$ROOT"
     [[ $status == 0 ]]
     grep -qx End "$dir/simpleFoam.log"

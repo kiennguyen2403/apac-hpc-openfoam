@@ -1,0 +1,30 @@
+412 ranks (I/O ranks excluded), 9 steps, step 1316.0 ms with the census on
+  average compute                     1040.6 ms   79.1%
+  whole-step imbalance (max - mean)     66.2 ms    5.0%
+  per-segment imbalance (>=)            61.8 ms    4.7%
+  communication + finer imbalance      147.4 ms   11.2%
+
+MPI time per step by category      all ranks    20 slowest ranks
+  allreduce                         135.0 ms     103.0 ms
+  wait                               99.7 ms      74.3 ms
+  post                               25.0 ms      31.3 ms
+  coll                               17.0 ms      16.3 ms
+  total                             276.7 ms     224.9 ms
+
+largest per-segment imbalances (max - mean over ranks, ms/step):
+  gamg:L0                mean   161.3  max   176.0  imbalance   14.6
+  grad:U                 mean    51.6  max    63.0  imbalance   11.3
+  gamg:L1                mean    51.5  max    60.9  imbalance    9.4
+  solve:U                mean   146.1  max   154.7  imbalance    8.6
+  lap:U                  mean    25.7  max    33.1  imbalance    7.4
+  wall:omegaMatrix       mean     6.0  max    13.0  imbalance    7.0
+  other                  mean   106.8  max   113.2  imbalance    6.4
+  turbulence             mean   129.8  max   136.2  imbalance    6.4
+  divDevReff             mean    31.1  max    35.3  imbalance    4.2
+  gamg:L2                mean    35.8  max    39.9  imbalance    4.2
+  solve:omega            mean    37.3  max    41.1  imbalance    3.8
+  wall:omegaUpdate       mean     3.2  max     6.8  imbalance    3.6
+
+ceilings (upper bounds on what a perfect fix could save):
+  perfect balance in every segment     128.0 ms    9.7%  (decomposition / partitioning work)
+  zero-cost communication              147.4 ms   11.2%  (MPI / network tuning; includes finer imbalance)
