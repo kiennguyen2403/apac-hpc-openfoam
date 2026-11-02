@@ -6,6 +6,8 @@
 #PBS -j oe
 
 # Identity test of fixedIterSolvers v3 (LD_PRELOAD Foam::smoothSolver::solve + Foam::solution::cache) on the skewed
+# (jobs 182885471/182885540 also covered the PCG::scalarSolve path of pcgFixedPath.C, since taken out of the build:
+# bit-identical, no gain at 4 nodes, job 182885925)
 # 3D box (tools/fusedVectorSolve/test/make_box_case.sh), serial and 4 ranks, with the SHIPPED fvSolution.fixedIter,
 # fvSchemes and controlDict.noWrite (endTime 20) and the shipped function-object files; the box caseDefinition is
 # the shipped one with fixedWallPatches/forcesWallPatches set to the box wall (ground).
@@ -16,7 +18,7 @@
 #                 compactAddr:fusedVectorSolve:stepReuse, simpleFoamFused
 #   bonus_v3      shipped files unchanged, preload compactAddr:fixedIterSolvers:fusedVectorSolve:stepReuse,
 #                 STEP_REUSE_OFF=wss,fco, simpleFoamFused
-#   bonus_v3_off  bonus_v3 with STEP_REUSE_OFF=wss,fco,fixed,gcache (both hooks call the stock functions)
+#   bonus_v3_off  bonus_v3 with STEP_REUSE_OFF=wss,fco,fixed,gcache,pcg (all hooks call the stock functions)
 # Checks per arm against basic: residual lines, every postProcessing file except wallClockTimeStatistics (solverInfo,
 # coefficient.dat, minMax, probes, wallShearStress), every basic log line type present (F5), report lines.
 # usage: qsub -v WORK=<new dir> identity_test.sh
@@ -24,7 +26,7 @@ set -euo pipefail
 : "${WORK:?qsub -v WORK=<dir>}"
 O=/scratch/ya41/kn3896/openfoam
 T=$O/tools
-SHIP=/scratch/ya41/apac-2026/openfoam/run/case/occDrivAerStaticMesh/system
+SHIP=/scratch/ya41/kn3896/openfoam/contest-results/compliance/reference/run/case/occDrivAerStaticMesh/system
 TIMER=$O/contest-results/vtune/drivaer_1node_icx_180728663/case/dynamicCode
 CALIB=$T/compactAddr/lib/linux64IcxDPInt32OptSPR/libcompactAddr.so
 FIS=$T/fixedIterSolvers/lib/linux64IcxDPInt32OptSPR/libfixedIterSolvers.so
@@ -68,7 +70,7 @@ for a in $ARMS; do
         echo "libs (\"$FIS2\");" >> "$C/system/controlDict"
         pre=$CALIB:$FLIB:$RLIB app=$SFF ;;
     bonus_v3)     pre=$CALIB:$FIS:$FLIB:$RLIB off=wss,fco app=$SFF ;;
-    bonus_v3_off) pre=$CALIB:$FIS:$FLIB:$RLIB off=wss,fco,fixed,gcache app=$SFF ;;
+    bonus_v3_off) pre=$CALIB:$FIS:$FLIB:$RLIB off=wss,fco,fixed,gcache,pcg app=$SFF ;;
     esac
     if [[ $a != bonus_v2 ]]; then
         cmp "$SHIP/fvSolution.fixedIter" "$C/system/fvSolution"
@@ -132,6 +134,8 @@ for f in k omega; do
 done
 for g in 'grad(p)' 'grad(k)' 'grad(omega)'; do need bonus_v3 "fixedIterSolvers: cache: $g cached in code"; done
 need bonus_v3 'fixedIterSolvers: cache: grad(p) stored when asked again'
+# (with pcgFixedPath.C in the build add: need bonus_v3 'residual norm after the last iteration only';
+#  need bonus_v3_off 'fixedIterSolvers: PCG '; never bonus_v3_off 'fixed iteration count')
 need bonus_v3 'fusedVectorSolve: U fused path (v3 folded copy)'
 need bonus_v3 'compactAddr: GaussSeidel: 16-bit neighbour offsets, folded source copy'
 never bonus_v3 'stock solve'

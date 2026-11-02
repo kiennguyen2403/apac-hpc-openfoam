@@ -2,4 +2,10 @@
 #   FOAM_EXTRA_CXXFLAGS="-xSAPPHIRERAPIDS -fp-model=precise" wmake libso
 # Use: mpirun ... -genv LD_PRELOAD lib/$WM_OPTIONS/libstepReuse.so simpleFoam -parallel
 #   gradient reuse also needs  cache { grad(k); grad(omega); }  in fvSolution
-#   STEP_REUSE_REPORT=1 prints which path ran; STEP_REUSE_OFF=gs,komega,kfuse,divdev,lap,conv,grad,fco,wss switches parts off
+#   STEP_REUSE_REPORT=1 prints which path ran; STEP_REUSE_OFF=gs,komega,kfuse,divdev,lap,conv,grad,climit switches parts off
+# 2026-11-02: devRhoReffFused.C (one-pass devRhoReff for the wallShearStress function object, STEP_REUSE_OFF=devrho) written,
+#   bit-identical (box job 182891085) but no gain at 4 nodes (jobs 182891677, 182892401): NOT in the build; test build in lib_v5_devrho/.
+#   Production binary = lib_v4/ (26d7cbbd..., the build of the finals 182882563/4/5), restored to lib/ 2026-11-02.
+# 2026-11-03: wallShearStressLazy.C and forceCoeffsLazy.C removed from the build and the source tree (function objects
+#   are part of the defined work, contest addendum F1/F5; they were switched off with STEP_REUSE_OFF=wss,fco in every
+#   compliant run). Copies: lib_v4/src_removed/. lib_v4/libstepReuse.so = the previous build (compliant finals).

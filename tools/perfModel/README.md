@@ -6,8 +6,8 @@ forward prediction recorded before it is measured. Scripts: `tools/perfModel/ban
 
 The scripts read the phase-census archive `diag/phase_census_4node_182140240.tar.gz` (per-rank timing from
 `tools/gamgCensus`); job folders named below are on Gadi project storage and are not in this repository.
-Usage: `python3 bandwidth_model.py [CENSUS_TAR]`, `python3 critical_path.py [CENSUS_TAR]`. A/B job script for the
-forward prediction: `scripts/profile/compiler/fo_revert_ab_4node.sh`.
+Usage: `python3 bandwidth_model.py [CENSUS_TAR]`, `python3 critical_path.py [CENSUS_TAR]`. A/B job scripts for the
+forward predictions: `scripts/profile/compiler/fo_revert_ab_4node.sh`, `scripts/profile/compiler/pcg_ab_4node.sh`.
 
 Input for both: the phase census `diag/phase_census_4node_182140240` (4 nodes x 104 ranks, 9 time
 steps, per-rank self times of every kernel and phase with MPI and nested calls excluded, MPI time by
@@ -125,3 +125,11 @@ The upper end is the bound that assumes every rank streams at its STREAM share a
 is how function objects run: all ranks together after the turbulence update, with no MPI waits to free
 bandwidth. Unlike the layout changes in Section 1 (60-90% realised), plain streaming field algebra
 converts its bytes to time fully. Cost of the compliant Bonus arm from this item: about +2.2%.
+
+## 4. Second forward test: the coarsest-level PCG norm skip (E1)
+
+Predicted 2026-11-02 (bytes none; 408 Allreduces/step removed): -0.2% if only their latency goes, -0.9% if the
+waits at them go too. Measured +0.02% (job 182885925, 4 nodes, 20 steps, one repeat, bit-identical, `pcg/`).
+The latency-only end was right and even that is below noise: the time ranks spend in these Allreduces is waiting
+for the slowest rank, which the remaining two sums per iteration still impose. Lesson for the model: a removed
+synchronisation saves time only when no other synchronisation follows before the next imbalance point.

@@ -1,5 +1,9 @@
 # fixedIterSolvers v3 (2026-11-02): LD_PRELOAD replacements of Foam::smoothSolver::solve (fixed-iteration path)
-# and Foam::solution::cache (grad(p), grad(k), grad(omega) cached). Shipped fvSolution and controlDict unchanged.
+# and Foam::solution::cache (grad(p), grad(k), grad(omega) cached). Used by the compliant finals 182882563/4/5.
+# NOT in the build: pcgFixedPath.C (Foam::PCG::scalarSolve, coarsest GAMG level with minIter == maxIter: skips the
+# residual norm and its Allreduce after each of the first 34 iterations; STEP_REUSE_OFF=pcg). Bit-identical (box
+# identity jobs 182885471/182885540) but +0.02% at 4 nodes (job 182885925, noise): the time at those Allreduces is
+# imbalance wait, not latency. Kept as source only; add it to Make/files to rebuild v3b (sha ab35ca0b...). Shipped fvSolution and controlDict unchanged.
 # Build: same flags as the ICX OptSPR build (its build script passes them via FOAM_EXTRA_CXXFLAGS; required for
 # bit-identity). wmake does not relink when sources change in Make/files: remove the .so and Make/$WM_OPTIONS first.
 #   rm -rf lib/$WM_OPTIONS/libfixedIterSolvers.so Make/$WM_OPTIONS lnInclude
@@ -8,3 +12,6 @@
 #   mpirun ... -genv LD_PRELOAD libcompactAddr.so:libfixedIterSolvers.so:libfusedVectorSolve.so:libstepReuse.so ...
 #   STEP_REUSE_OFF=fixed / gcache switch the two parts off; STEP_REUSE_REPORT=1 prints which path ran.
 # Previous version (smoothSolverFixed/PCGFixed via fvSolution names + controlDict libs): lib_v2/.
+# Production binary = the 2026-11-02 13:12 build (sha256 085f63bf07c4bbd9..., copy in lib_v3/), the one the compliant
+# finals 182882563/4/5 and identity job 182881133 ran. A rebuild of the same sources at 14:05 gave a different sha
+# (d6ae4dbf...; same code paths, different layout), so the 13:12 binary was restored to lib/ for reproducibility.

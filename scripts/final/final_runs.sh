@@ -17,8 +17,8 @@
 #   FIXED_ITER=1  fixed-iteration smoothSolver path (libfixedIterSolvers) and the fused U solve (libfusedVectorSolve,
 #                 whose fused path also computes the residual after the last sweep only); 0 -> STEP_REUSE_OFF+=fixed
 #                 and libfusedVectorSolve not preloaded
-#   FCO_LAZY=0    forceCoeffs coefficient fields skipped without writeFields (libstepReuse; 0 -> STEP_REUSE_OFF+=fco)
-#   wallShearStress is always evaluated every step as in the stock code (STEP_REUSE_OFF+=wss).
+#   Function objects always run exactly as in the stock code: the wallShearStress and forceCoeffs deferrals were
+#   removed from libstepReuse on 2026-11-03 (before that they were switched off with STEP_REUSE_OFF=wss,fco).
 # Steps (Addendum 2026-09-25, F1): the shipped controlDict.noWrite with only endTime changed
 # (1n 40, 2n 80, 4n 150); fvSolution.fixedIter, fvSchemes and controlDict.noWrite must match the
 # shipped case, and caseDefinition may differ from it only in nCores / decompositionMethod /
@@ -60,6 +60,9 @@
 #           grad(omega)), so fvSolution and controlDict stay as shipped; PCGFixed dropped (never engaged: the
 #           coarsest-level PCG has a non-zero default tolerance). LD_PRELOAD order:
 #           compactAddr : fixedIterSolvers : fusedVectorSolve : stepReuse; STEP_REUSE_OFF=wss,fco.
+#           (A PCG::scalarSolve replacement for the coarsest GAMG level, minIter 35 = maxIter 35 so the residual
+#           norm after each of the first 34 iterations is skipped, was bit-identical (box jobs 182885471/182885540)
+#           but +0.02% at 4 nodes (job 182885925, noise): not built, source kept as pcgFixedPath.C.)
 #           (Job 181332282 ran bonus without the fused vector solve.)
 # Prepared cases (prep chain done once, reused): 1n vtune/drivaer_1node_icx_180728663/case,
 # 2n final/case208 (parallel prep done here on first use), 4n decomp-screen/case416_w05.
@@ -72,19 +75,29 @@ ARMS=${ARMS:-basic bonus}
 REF_CD=${REF_CD:-}
 GCACHE=${GCACHE:-1}
 FIXED_ITER=${FIXED_ITER:-1}
-FCO_LAZY=${FCO_LAZY:-0}
 NP=$((NNODES * 104))
-TEAM=/scratch/ya41/apac-2026/openfoam
+TEAM=/scratch/ya41/kn3896/openfoam/contest-results/compliance/reference   # read-only copy of the team files (the team folder moved)
 SHIP=$TEAM/run/case/occDrivAerStaticMesh
 FOAM=/scratch/ya41/kn3896/openfoam/OpenFOAM-v2512
 RES=/scratch/ya41/kn3896/openfoam/contest-results
-FIS=/scratch/ya41/kn3896/openfoam/tools/fixedIterSolvers/lib/linux64IcxDPInt32OptSPR/libfixedIterSolvers.so
-FLIB=/scratch/ya41/kn3896/openfoam/tools/fusedVectorSolve/lib/linux64IcxDPInt32OptSPR/libfusedVectorSolve.so
-RLIB=/scratch/ya41/kn3896/openfoam/tools/stepReuse/lib/linux64IcxDPInt32OptSPR/libstepReuse.so
-SFF=/scratch/ya41/kn3896/openfoam/tools/simpleFoamFused/bin/linux64IcxDPInt32OptSPR/simpleFoamFused
-CALIB=/scratch/ya41/kn3896/openfoam/tools/compactAddr/lib/linux64IcxDPInt32OptSPR/libcompactAddr.so
+# COMPILER=icx (default; ICX 2025.3.2 -O3 -xSAPPHIRERAPIDS -fp-model=precise, platform linux64IcxDPInt32OptSPR) or
+# COMPILER=gcc (GCC 14.2.0 -O3 -march=sapphirerapids, platform linux64GccDPInt32OptSPR, build job 182952873; Bonus
+# components built with GCC by build_tools_gcc_jobfs.sh). Both arms use the chosen compiler's build.
+COMPILER=${COMPILER:-icx}
+case $COMPILER in
+    icx) OPT=linux64IcxDPInt32OptSPR ;;
+    gcc) OPT=linux64GccDPInt32OptSPR
+         GCCTIMER=${GCCTIMER:-/scratch/ya41/kn3896/openfoam/contest-results/compiler-ab/build_gcc_OptSPR_182952873/dynamicCode_gcc} ;;
+    *) echo "COMPILER must be icx or gcc"; exit 1 ;;
+esac
+FIS=/scratch/ya41/kn3896/openfoam/tools/fixedIterSolvers/lib/$OPT/libfixedIterSolvers.so
+FLIB=/scratch/ya41/kn3896/openfoam/tools/fusedVectorSolve/lib/$OPT/libfusedVectorSolve.so
+RLIB=/scratch/ya41/kn3896/openfoam/tools/stepReuse/lib/$OPT/libstepReuse.so
+SFF=/scratch/ya41/kn3896/openfoam/tools/simpleFoamFused/bin/$OPT/simpleFoamFused
+CALIB=/scratch/ya41/kn3896/openfoam/tools/compactAddr/lib/$OPT/libcompactAddr.so
 TIMER_SRC=$RES/vtune/drivaer_1node_icx_180728663/case/dynamicCode
-ROOT=$RES/final/runs_${NNODES}n_${PBS_JOBID%%.*}
+PFX=""; if [[ $COMPILER == gcc ]]; then PFX=gcc_; fi
+ROOT=$RES/final/runs_${PFX}${NNODES}n_${PBS_JOBID%%.*}
 case $NNODES in
     1) CASE=$RES/vtune/drivaer_1node_icx_180728663/case; LOGS=$CASE/../logFiles; fh=(-fileHandler hostCollated); STEPS=40 ;;
     2) CASE=$RES/final/case208; LOGS=$CASE/logFiles; fh=(-fileHandler collated -ioRanks '(0 104)'); STEPS=80 ;;
@@ -109,16 +122,15 @@ echo "== controlDict: shipped controlDict.noWrite vs run" >> compliance.txt
 diff "$SHIP/system/controlDict.noWrite" controlDict.run >> compliance.txt || true
 [[ -f $FIS && -f $FLIB && -f $RLIB && -f $CALIB && -x $SFF ]]
 for a in $ARMS; do [[ $a == basic || $a == bonus ]]; done
-for s in GCACHE FIXED_ITER FCO_LAZY; do [[ ${!s} == 0 || ${!s} == 1 ]]; done
+for s in GCACHE FIXED_ITER; do [[ ${!s} == 0 || ${!s} == 1 ]]; done
 # Bonus preload list and switched-off parts
-BONUS_OFF=wss
-[[ $FCO_LAZY == 1 ]] || BONUS_OFF+=,fco
+BONUS_OFF=none   # switches nothing off (no STEP_REUSE_OFF key is a substring of "none")
 [[ $GCACHE == 1 ]] || BONUS_OFF+=,gcache
 [[ $FIXED_ITER == 1 ]] || BONUS_OFF+=,fixed
 if [[ $FIXED_ITER == 1 ]]; then BONUS_PRELOAD=$CALIB:$FIS:$FLIB:$RLIB; else BONUS_PRELOAD=$CALIB:$FIS:$RLIB; fi
 {
     echo "== bonus arm: $SFF -parallel, shipped fvSolution and run controlDict unchanged (no libs line)"
-    echo "   GCACHE=$GCACHE FIXED_ITER=$FIXED_ITER FCO_LAZY=$FCO_LAZY"
+    echo "   GCACHE=$GCACHE FIXED_ITER=$FIXED_ITER"
     echo "   LD_PRELOAD=$BONUS_PRELOAD"
     echo "   STEP_REUSE_OFF=$BONUS_OFF"
 } >> compliance.txt
@@ -144,7 +156,13 @@ if [[ $prep_done == 0 ]]; then
 )
 fi
 [[ -d $CASE/dynamicCode ]] || cp -a "$TIMER_SRC" "$CASE/dynamicCode"
-ls "$CASE/dynamicCode/platforms/linux64IcxDPInt32OptSPR/lib/"libwallClockTimeStatistics_*.so > /dev/null
+if [[ $COMPILER == gcc && ! -d $CASE/dynamicCode/platforms/$OPT/lib ]]; then
+    # the coded timer compiled for the GCC platform (same source, SHA1 6e8d888...; no source tree here to compile it)
+    grep -q 6e8d888ad28997c1bc9eebd1c08a1a15774516a4 "$CASE/dynamicCode/wallClockTimeStatistics/Make/files"
+    mkdir -p "$CASE/dynamicCode/platforms/$OPT"
+    cp -a "$GCCTIMER/platforms/$OPT/lib" "$CASE/dynamicCode/platforms/$OPT/"
+fi
+ls "$CASE/dynamicCode/platforms/$OPT/lib/"libwallClockTimeStatistics_*.so > /dev/null
 # Both arms run the case fvSolution, which must be the shipped fvSolution.fixedIter
 cmp "$SHIP/system/fvSolution.fixedIter" "$CASE/system/fvSolution"
 echo "== fvSolution: case = shipped fvSolution.fixedIter (cmp), both arms" >> compliance.txt
@@ -153,13 +171,20 @@ if [[ -d $CASE/postProcessing ]]; then mv "$CASE/postProcessing" "$ROOT/postProc
 # --- solver environment ------------------------------------------------------------
 set +eu
 module purge
-module load intel-compiler-llvm/2025.3.2 intel-mpi/2021.17.2 metis/5.1.0 fftw3/3.3.10 boost/1.84.0
-export CC=icx CXX=icpx I_MPI_CC=icx I_MPI_CXX=icpx
-source "$FOAM/etc/bashrc" WM_COMPILER_TYPE=system WM_COMPILER=Icx WM_CC=icx WM_CXX=icpx \
-    WM_MPLIB=INTELMPI WM_COMPILE_OPTION=OptSPR
+if [[ $COMPILER == gcc ]]; then
+    module load gcc/14.2.0 intel-mpi/2021.17.2 metis/5.1.0 fftw3/3.3.10 boost/1.84.0
+    export CC=gcc CXX=g++ I_MPI_CC=gcc I_MPI_CXX=g++
+    source "$FOAM/etc/bashrc" WM_COMPILER_TYPE=system WM_COMPILER=Gcc WM_CC=gcc WM_CXX=g++ \
+        WM_MPLIB=INTELMPI WM_COMPILE_OPTION=OptSPR
+else
+    module load intel-compiler-llvm/2025.3.2 intel-mpi/2021.17.2 metis/5.1.0 fftw3/3.3.10 boost/1.84.0
+    export CC=icx CXX=icpx I_MPI_CC=icx I_MPI_CXX=icpx
+    source "$FOAM/etc/bashrc" WM_COMPILER_TYPE=system WM_COMPILER=Icx WM_CC=icx WM_CXX=icpx \
+        WM_MPLIB=INTELMPI WM_COMPILE_OPTION=OptSPR
+fi
 export WM_THIRD_PARTY_DIR=/apps/OpenFOAM/2512/ThirdParty-v2512 PTSCOTCH_ARCH_PATH=none
 set -eu
-[[ $WM_OPTIONS == linux64IcxDPInt32OptSPR ]]
+[[ $WM_OPTIONS == "$OPT" ]]
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 FOAM_SIGFPE=true
 export I_MPI_LIBRARY_KIND=release I_MPI_FABRICS=shm:ofi I_MPI_OFI_PROVIDER=mlx I_MPI_DEBUG=0
 unset I_MPI_PIN_DOMAIN I_MPI_PIN_PROCESSOR_EXCLUDE_LIST I_MPI_PIN_DOMAIN_SIZE
@@ -174,7 +199,7 @@ glibcT=(-genv MALLOC_MMAP_THRESHOLD_ 33554432 -genv MALLOC_TRIM_THRESHOLD_ 42949
 ucxT=(-genv UCX_ZCOPY_THRESH inf -genv UCX_RNDV_THRESH inf)
 {
     echo "simpleFoam=$(command -v simpleFoam)"
-    echo "compiler=$(icpx --version | head -1)"
+    echo "compiler=$($CXX --version | head -1) (COMPILER=$COMPILER, platform $OPT)"
     echo "mpi=$(mpirun --version 2>&1 | head -1)"
     echo "ucx=$(ucx_info -v | head -1) env: ${ucxT[*]}"
     echo "fixedIterSolvers=$FIS sha256=$(sha256sum "$FIS" | cut -d' ' -f1)"
@@ -236,11 +261,7 @@ run() {   # $1 arm (basic|bonus), $2 repeat
         grep -q 'stepReuse: convection: fused Gauss linearUpwindV' "$log"
         grep -q 'stepReuse: gaussGrad: interpolation fused' "$log"
         grep -q 'stepReuse: cellLimitedGrad: limiter passes fused' "$log"
-        if [[ $FCO_LAZY == 1 ]]; then
-            grep -q 'stepReuse: forceCoeffs: coefficient fields only with writeFields' "$log"
-        else
-            absent 'stepReuse: forceCoeffs: coefficient fields only with writeFields' "$log"
-        fi
+        absent 'stepReuse: forceCoeffs: coefficient fields only with writeFields' "$log"
         absent 'stepReuse: wallShearStress: evaluated in write' "$log"
         grep -q 'simpleFoamFused: momentum solve without matrix copy' "$log"
         grep -q 'simpleFoamFused: pressure equation steps fused' "$log"
@@ -253,7 +274,7 @@ run() {   # $1 arm (basic|bonus), $2 repeat
 for ((r = 1; r <= REPEATS; r++)); do for a in $ARMS; do run $a $r; done; done
 cmp "$CASE/system/controlDict" controlDict.run   # case restored
 
-python3 - "$ROOT" "$NNODES" "$STEPS" "$REPEATS" "$ARMS" "$REF_CD" "GCACHE=$GCACHE FIXED_ITER=$FIXED_ITER FCO_LAZY=$FCO_LAZY STEP_REUSE_OFF=$BONUS_OFF" <<'PY'
+python3 - "$ROOT" "$NNODES" "$STEPS" "$REPEATS" "$ARMS" "$REF_CD" "GCACHE=$GCACHE FIXED_ITER=$FIXED_ITER STEP_REUSE_OFF=$BONUS_OFF" <<'PY'
 import re, sys
 from pathlib import Path
 root, nn, steps, reps = Path(sys.argv[1]), sys.argv[2], sys.argv[3], int(sys.argv[4])

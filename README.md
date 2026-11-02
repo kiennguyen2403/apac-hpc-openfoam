@@ -31,8 +31,10 @@ What changed for compliance:
   instead of new solver names and extra cache entries in `fvSolution` and a `libs` line in `controlDict`.
   Box test with the shipped `fvSolution`, `controlDict` and function objects (job 182881133): Basic, the old
   Bonus, the new Bonus and the new Bonus with both replacements switched off are bit-identical.
-- `wallShearStress` and the `forceCoeffs` coefficient fields are evaluated every step as in stock OpenFOAM
-  (`STEP_REUSE_OFF=wss,fco`); this costs +2.23% (job 182232191).
+- `wallShearStress` and the `forceCoeffs` coefficient fields are evaluated every step as in stock OpenFOAM. The two
+  `stepReuse` deferrals were first switched off with `STEP_REUSE_OFF=wss,fco` (+2.23%, job 182232191) and on
+  2026-11-03 removed from the library and the source tree, so no setting can bring them back. Box identity test of the
+  rebuilt library: bit-identical, serial and 4 ranks.
 
 ## Development history (4 nodes × 104 ranks, 150 steps, best of 3, before the compliance changes)
 
@@ -182,26 +184,25 @@ One `LD_PRELOAD` library with three replacements, each bit-identical to stock Op
   correction face field, a flux face field and a surface integral.
 - **Gauss gradient** (`gaussGrad<Type>::calcGrad`, both the returning and the in-place version used by the
   solution cache): the interpolation inside the gradient's face loop.
-- **forceCoeffs**: the two full-mesh coefficient fields are only computed with `writeFields` on; the written
-  coefficients come from the summed patch forces (`execute()` is replaced too, since the library inlines
-  `reset()` into it).
+- *(removed 2026-11-03)* **forceCoeffs**: computed the two full-mesh coefficient fields only with `writeFields`
+  on. Function-object work, so dropped for the contest addendum (see "Tried and rejected").
 - **cellLimited gradient of U** (`cellLimitedGrad<vector, minmod>::calcGrad`): the neighbour max/min is taken
   in the Gauss gradient's face loop, max/min/limiter are initialised in one loop and the deltas max - U,
   min - U are formed where the limiter uses them (stock: two copies, a separate max/min face loop, two
   subtraction passes). Max, min and the limiter are min/max selections, exact in any order. −0.37% at 4
   nodes (job 182137125), within noise; bit-identical.
-- **wallShearStress** function object: evaluated `devReff()` over the whole mesh every step but only
-  writes at write time (never, in a benchmark run). `execute()` now defers to `write()`, which runs the
-  stock `execute()` and `write()` (through `dlsym(RTLD_NEXT)`).
+- *(removed 2026-11-03)* **wallShearStress** function object: deferred its every-step `devReff()` evaluation to
+  write time (never reached with `controlDict.noWrite`). Function-object work, so dropped for the contest addendum.
 
-Switch parts off with `STEP_REUSE_OFF=gs,komega,kfuse,divdev,lap,conv,grad,climit,fco,wss`;
+Switch parts off with `STEP_REUSE_OFF=gs,komega,kfuse,divdev,lap,conv,grad,climit`;
 `STEP_REUSE_REPORT=1` prints which path ran.
 
 Also: `grad(k)` and `grad(omega)` cached. They are computed for `CDkOmega` and again by the corrected
 laplacian terms; the stock solution cache reuses them once they are on its list, like `grad(p)`, which
 uncached is computed five times per step (box test with `DEBUG_CACHE=1`). These measurements added them to
 the `cache` list in `fvSolution`; since v3 `fixedIterSolvers` adds them in `solution::cache` instead.
-The final runs use `STEP_REUSE_OFF=wss,fco` (function objects evaluated every step as in stock OpenFOAM).
+The final runs evaluate the function objects every step as in stock OpenFOAM: the two deferrals were switched off
+with `STEP_REUSE_OFF=wss,fco` from 2026-11-02 and removed from the library on 2026-11-03.
 
 Paired, 4 nodes, 20 steps, same nodes (job 181376137), bit-identical:
 
@@ -376,7 +377,7 @@ MPI time, neighbours, rusage; `analyse_*.py`):
 | Compact pinning / rank reordering to keep halos within a socket | with the UCX setting, cross-socket faces cost the same as same-socket faces (census fit) |
 | Huge pages for the heap | page walks are 1.2% of cycles; jemalloc with THP was −2.5% on one node, +92% on another |
 | Compact addressing in the fused U solve (`fusedVectorSolve` v4) | bit-identical, −0.15% (noise) |
-| `stepReuse` deferral of `wallShearStress` to write time and of the `forceCoeffs` coefficient fields | output identical, but the work is skipped; dropped for addendum compliance (function objects are part of the defined work), costs +2.23% |
+| `stepReuse` deferral of `wallShearStress` to write time and of the `forceCoeffs` coefficient fields | output identical, but the work is skipped; dropped for addendum compliance (function objects are part of the defined work), costs +2.23%; removed from the build and the source tree 2026-11-03 |
 
 ## `scripts/` and `wmake-rules/`
 

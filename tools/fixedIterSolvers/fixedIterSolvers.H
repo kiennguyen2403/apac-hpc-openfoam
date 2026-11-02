@@ -1,11 +1,12 @@
 /*---------------------------------------------------------------------------*\
     fixedIterSolvers: shared helpers for the LD_PRELOAD replacements in this
-    library (smoothSolverFixedPath.C, solutionCache.C).
+    library (smoothSolverFixedPath.C, solutionCache.C, pcgFixedPath.C).
 
     STEP_REUSE_OFF  comma list of features to switch off (same variable as
                     libstepReuse / libcompactAddr / libfusedVectorSolve):
                       fixed   smoothSolver fixed-iteration path
                       gcache  grad(p), grad(k), grad(omega) cache
+                      pcg     PCG fixed-count path (pcgFixedPath.C; not built: no gain)
                     The stock code then runs, through the next definition of
                     the replaced symbol.
     STEP_REUSE_REPORT=1  one line per path on stderr (master) saying which

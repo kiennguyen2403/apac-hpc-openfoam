@@ -1,8 +1,10 @@
 /*---------------------------------------------------------------------------*\
     stepReuse: shared helpers for the LD_PRELOAD replacements in this library
-    (gaussSeidelFold.C, kOmegaSSTReuse.C, wallShearStressLazy.C).
+    (gaussSeidelFold.C, kOmegaSSTReuse.C, divDevReffFused.C, laplacianFused.C, gradFused.C,
+    convectionFused.C, cellLimitedGradFused.C).
 
-    STEP_REUSE_OFF  comma list of features to switch off: gs, komega, wss
+    STEP_REUSE_OFF  comma list of features to switch off: gs, komega, kfuse, divdev, lap,
+                    conv, grad, climit
                     (the stock code then runs, through the next definition
                     of the replaced symbol)
     STEP_REUSE_REPORT=1  one line per feature on stderr (master) saying
