@@ -1,2 +1,10 @@
-# Build: same flags as the ICX OptSPR build (its build script passes them via FOAM_EXTRA_CXXFLAGS):
+# fixedIterSolvers v3 (2026-11-02): LD_PRELOAD replacements of Foam::smoothSolver::solve (fixed-iteration path)
+# and Foam::solution::cache (grad(p), grad(k), grad(omega) cached). Shipped fvSolution and controlDict unchanged.
+# Build: same flags as the ICX OptSPR build (its build script passes them via FOAM_EXTRA_CXXFLAGS; required for
+# bit-identity). wmake does not relink when sources change in Make/files: remove the .so and Make/$WM_OPTIONS first.
+#   rm -rf lib/$WM_OPTIONS/libfixedIterSolvers.so Make/$WM_OPTIONS lnInclude
 #   FOAM_EXTRA_CXXFLAGS="-xSAPPHIRERAPIDS -fp-model=precise" wmake libso
+# Use (after libcompactAddr, before libfusedVectorSolve / libstepReuse):
+#   mpirun ... -genv LD_PRELOAD libcompactAddr.so:libfixedIterSolvers.so:libfusedVectorSolve.so:libstepReuse.so ...
+#   STEP_REUSE_OFF=fixed / gcache switch the two parts off; STEP_REUSE_REPORT=1 prints which path ran.
+# Previous version (smoothSolverFixed/PCGFixed via fvSolution names + controlDict libs): lib_v2/.

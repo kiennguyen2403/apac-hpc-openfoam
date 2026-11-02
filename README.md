@@ -4,7 +4,40 @@ Tools, solver code and job scripts from tuning `simpleFoam` on the 65M-cell
 occDrivAerStaticMesh case on NCI Gadi (Sapphire Rapids, `normalsr`), OpenFOAM v2512
 built with Intel oneAPI ICX 2025.3 and Intel MPI 2021.17.
 
-## Results (4 nodes × 104 ranks, 150 steps, best of 3, arms interleaved on the same nodes)
+## Results: compliant with the contest addendum (2026-09-25)
+
+Basic and Bonus in the same job on the same nodes (one run each), both with the shipped `fvSolution.fixedIter`,
+`fvSchemes` and `controlDict.noWrite` (only `endTime` changed, function objects as shipped). The Bonus arm adds
+`LD_PRELOAD` libraries and runs `simpleFoamFused`; it changes no case file.
+
+| Nodes × ranks, steps | Job | Basic s/step | Bonus s/step | Bonus vs Basic | Cd (Basic = Bonus) |
+|---|---|---:|---:|---:|---|
+| 1 × 104, 40 | 182882565 | 8.2450 | 5.3229 | −35.4% | 0.43805628753637488 |
+| 2 × 104, 80 | 182882564 | 4.0362 | 2.5918 | −35.8% | 0.33772590153571347 |
+| **4 × 104, 150 (scored)** | 182882563 | 1.9536 | **1.2674** | **−35.1%** | 0.28738062413153675 |
+
+Every job compares the two arms: the whole `coefficient.dat`, `solverInfo.dat` and every residual line are
+bit-identical, and every line type of the Basic log also appears in the Bonus log (the Bonus log only adds one
+report line per engaged code path). `scripts/final/final_runs.sh` writes this to `compliance.txt` together with
+the diffs of `caseDefinition`, `decomposeParDict` and `controlDict` against the shipped case.
+
+What changed for compliance:
+
+- `controlDict` is the shipped `controlDict.noWrite` with only `endTime` changed (the team file set
+  `runTimeModifiable no`); `final_runs.sh` stops if `fvSolution.fixedIter`, `fvSchemes` or `controlDict.noWrite`
+  differ from the shipped case or `caseDefinition` differs outside `nCores` / `decompositionMethod` /
+  `nHierarchical`; the scotch `domains` / `domainWeights` sit in `decomposeParDict`'s `scotchCoeffs`.
+- `fixedIterSolvers` v3 replaces the stock `smoothSolver::solve` and `solution::cache` through `LD_PRELOAD`,
+  instead of new solver names and extra cache entries in `fvSolution` and a `libs` line in `controlDict`.
+  Box test with the shipped `fvSolution`, `controlDict` and function objects (job 182881133): Basic, the old
+  Bonus, the new Bonus and the new Bonus with both replacements switched off are bit-identical.
+- `wallShearStress` and the `forceCoeffs` coefficient fields are evaluated every step as in stock OpenFOAM
+  (`STEP_REUSE_OFF=wss,fco`); this costs +2.23% (job 182232191).
+
+## Development history (4 nodes × 104 ranks, 150 steps, best of 3, before the compliance changes)
+
+These runs used the team's `controlDict`; the Bonus arm also renamed solvers and extended the cache in
+`fvSolution` and deferred the two function-object parts above.
 
 | Setup | s/step | vs Basic | Cd at step 150 |
 |---|---:|---:|---|
@@ -24,72 +57,56 @@ Basic and the first Bonus row ran in the same job (181332282); the v1 and v2 row
 same Cd. The Basic row predates the UCX setting (both arms of `scripts/final/final_runs.sh` now use it). Both solver changes are bit-identical to stock OpenFOAM: every solver log line, field and force
 coefficient matches.
 
-2 and 1 nodes (current setup, Basic and Bonus in the same job, Cd bit-identical):
+2 and 1 nodes (same setup, Basic and Bonus in the same job, Cd bit-identical):
 
 | Configuration | Basic s/step | Bonus s/step | vs Basic | Cd |
 |---|---:|---:|---:|---|
 | 2 nodes × 104, 80 steps (job 182181634) | 4.0081 | 2.5402 | −36.6% | 0.33772590153571347 |
 | 1 node × 104, 40 steps (job 182181635) | 8.1711 | 5.2129 | −36.2% | 0.43805628753637488 |
 
-**Contest addendum (2026-09-25) compliance.** The addendum keeps `fvSolution.fixedIter`, `fvSchemes` and
-`controlDict.noWrite` (including its function objects) as shipped in every tier, and limits the Basic case edits
-to `nCores`, `decompositionMethod`, `nHierarchical`, the method's coefficients and `endTime`. The numbers above
-used the team's `controlDict` (`runTimeModifiable no`), and the Bonus arm also renamed solvers and extended the
-cache in `fvSolution` and deferred two function objects. Status:
-
-- `scripts/final/final_runs.sh` now builds `controlDict` from the shipped `controlDict.noWrite` (only `endTime`
-  changed) and stops if `fvSolution.fixedIter`, `fvSchemes` or `controlDict.noWrite` differ from the shipped case,
-  or if `caseDefinition` differs outside `nCores` / `decompositionMethod` / `nHierarchical` (the scotch
-  `domains` / `domainWeights` now sit in `decomposeParDict`'s `scotchCoeffs`).
-- **Compliant Basic, 4 nodes × 150 steps: 1.9341 s/step** (job 182187466, one run, with the UCX setting),
-  Cd 0.28738062413153675, identical to the earlier Basic.
-- Re-enabling the deferred `wallShearStress` and `forceCoeffs` fields costs +2.23% in the Bonus arm (job
-  182232191). Moving the fixed-iteration and cache switches from `fvSolution` into the preloaded libraries, and
-  the compliant Bonus finals, are still to do.
-
-## `tools/fixedIterSolvers` — solver plugin (main result)
+## `tools/fixedIterSolvers` — fixed-iteration solver path and gradient cache (main result)
 
 With fixed-iteration controls (`tolerance 0; relTol 0;` plus `maxIter`), convergence can
-never be reached, yet the stock solvers still test for it every iteration:
+never be reached, yet the stock `smoothSolver` still tests for it after every sweep: a full
+residual (a new field, one extra matrix pass) and a global reduction, all feeding a test that
+always fails. The fixed-iteration path does the same sweeps and computes the residual once,
+after the last one. When convergence is possible, the stock solver runs.
 
-- `smoothSolver` computes a full residual after every sweep (a new field, one extra matrix
-  pass and a global reduction);
-- `PCG` computes a residual norm (a global reduction) every iteration.
-
-`smoothSolverFixed` and `PCGFixed` do the same sweeps and iterations and compute these once,
-after the last one. When convergence is possible they behave exactly like the originals.
-
-Results are **bit-identical** to the stock solvers (every solver log line, every field and
-force coefficient), measured paired on the same nodes, 10 steps:
+Results are **bit-identical** to the stock solver (every solver log line, every field and
+force coefficient), measured paired on the same nodes, 10 steps (v1):
 
 | Run | Stock | Plugin | Change |
 |---|---:|---:|---:|
 | 1 node × 104 ranks | 8.165 s/step | 6.988 s/step | −14.4% |
 | 4 nodes × 104 ranks | 1.995 s/step | 1.669 s/step | −16.3% |
 
-Build with the same flags as the OpenFOAM build (required for bit-identity, since `PCGFixed`
-carries its own copy of PCG's arithmetic loops):
+v3 (current, 2026-11-02) is one `LD_PRELOAD` library with two replacements, so the case files stay as
+shipped:
+
+- `Foam::smoothSolver::solve`: the fixed-iteration path when the controls make early convergence
+  impossible (`fixedIterControl.H`), otherwise the stock function (next definition, through
+  `dlsym(RTLD_NEXT)`). With a GaussSeidel smoother all sweeps go into one smoother call (n sweeps in one
+  call are exactly n calls of one sweep), so the smoother can fold its per-sweep copy (`compactAddr`,
+  `stepReuse`).
+- `Foam::solution::cache`: answers as the stock function (the `cache` list of `fvSolution`) and also
+  yes for `grad(p)`, `grad(k)` and `grad(omega)`. `gradScheme::grad` reuses a cached gradient only
+  while it is up to date with its field, so results stay identical (see `stepReuse` below for the gains).
+
+`STEP_REUSE_OFF=fixed` / `gcache` switch the two parts off; `STEP_REUSE_REPORT=1` prints which path ran.
+`test/identity_test.sh` checks it on a box case with the shipped `fvSolution`, `fvSchemes`, `controlDict`
+and function objects (Basic, the v2 setup, v3, and v3 with both parts off; serial and 4 ranks).
 
 ```bash
 FOAM_EXTRA_CXXFLAGS="-xSAPPHIRERAPIDS -fp-model=precise" wmake libso
+mpirun ... -genv LD_PRELOAD libcompactAddr.so:libfixedIterSolvers.so:libfusedVectorSolve.so:libstepReuse.so ...
 ```
 
-v2: with a GaussSeidel smoother, `smoothSolverFixed` does all the sweeps of its iteration loop in
-one smoother call (n sweeps in one call are exactly n calls of one sweep), so the smoother can fold
-its per-sweep copy (see `tools/stepReuse`).
-
-`GaussSeidelNoCopy` (same library) is a GaussSeidel smoother that avoids the per-sweep
-`bPrime = source` copy. It is bit-identical but measured **2.8% slower** (the per-face branch
-costs more than the streaming copy), so it is not used.
-
-Enable in a case:
-
-```
-// system/controlDict
-libs ("<path>/libfixedIterSolvers.so");
-
-// system/fvSolution: smoothSolver -> smoothSolverFixed, coarsest-level PCG -> PCGFixed
-```
+Earlier versions (in this repository's history up to commit e3e38a1) were new solver types,
+`smoothSolverFixed` and `PCGFixed`, selected by renaming the solvers in `fvSolution` and loading the
+library with a `libs` line in `controlDict`. `PCGFixed` never engaged on this case (the coarsest-level
+PCG has the default non-zero tolerance) and is gone. `GaussSeidelNoCopy`, a smoother without the
+per-sweep `bPrime = source` copy, was bit-identical but 2.8% slower (the per-face branch costs more
+than the streaming copy) and is gone too.
 
 ## `tools/fusedVectorSolve` — one GaussSeidel sweep for Ux, Uy, Uz
 
@@ -180,9 +197,11 @@ One `LD_PRELOAD` library with three replacements, each bit-identical to stock Op
 Switch parts off with `STEP_REUSE_OFF=gs,komega,kfuse,divdev,lap,conv,grad,climit,fco,wss`;
 `STEP_REUSE_REPORT=1` prints which path ran.
 
-Also: `grad(k)` and `grad(omega)` in the fvSolution `cache` list. They are computed for `CDkOmega` and
-again by the corrected laplacian terms; the stock solution cache reuses them (no code needed), like
-`grad(p)`, which uncached is computed five times per step (box test with `DEBUG_CACHE=1`).
+Also: `grad(k)` and `grad(omega)` cached. They are computed for `CDkOmega` and again by the corrected
+laplacian terms; the stock solution cache reuses them once they are on its list, like `grad(p)`, which
+uncached is computed five times per step (box test with `DEBUG_CACHE=1`). These measurements added them to
+the `cache` list in `fvSolution`; since v3 `fixedIterSolvers` adds them in `solution::cache` instead.
+The final runs use `STEP_REUSE_OFF=wss,fco` (function objects evaluated every step as in stock OpenFOAM).
 
 Paired, 4 nodes, 20 steps, same nodes (job 181376137), bit-identical:
 
@@ -367,4 +386,5 @@ Gadi project storage.
 
 ## License
 
-GPL-3.0, as OpenFOAM: `PCGFixed.C` is a modified copy of OpenFOAM's `PCG.C`. See `LICENSE`.
+GPL-3.0, as OpenFOAM: several files are modified copies of OpenFOAM code (e.g. `simpleFoamFused`,
+the fixed-iteration path of `smoothSolver::solve`). See `LICENSE`.
