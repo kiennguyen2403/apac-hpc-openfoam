@@ -17,6 +17,17 @@
 
     v3: all sweeps run as one sequence and the copy bPrime = source for the
     next sweep happens inside the current one (see the sweep loop).
+
+    v5 (2026-11-03): the per-iteration convergence checks are computed, as in
+    stock smoothSolver::solve: after every group of nSweeps sweeps, the
+    residual of each component (lduMatrix::residual, with its interface
+    update), its global sum (gSumMag) and the convergence test
+    (SolverPerformance::checkConvergence). The three residuals are formed in
+    one pass over the matrix, like the final residuals. With the fixed-iteration
+    controls the checks cannot stop the solve, as in stock; at log >= 2 every
+    check is printed in stock's format and component order, so the log can be
+    compared line by line with stock OpenFOAM's (versions up to v3 skipped
+    these checks and fell back to the generic code at log >= 2).
 \*---------------------------------------------------------------------------*/
 
 #include "fvMatrices.H"
@@ -29,6 +40,8 @@
 #include <cstring>
 #include <iostream>
 #include <type_traits>
+#include <utility>
+#include <vector>
 
 namespace Foam
 {
@@ -40,11 +53,15 @@ struct controls
     label nSweeps = 1;
     label maxIter = lduMatrix::defaultMaxIter;
     label minIter = 0;
+    scalar tolerance = lduMatrix::defaultTolerance;
+    scalar relTol = 0;
+    int log = 1;
     bool ok = false;
 };
 
-// Controls for which smoothSolver + GaussSeidel can never converge early and
-// print nothing per iteration, so the fused sweep reproduces it exactly
+// Controls for which smoothSolver + GaussSeidel can never converge early, so
+// every component runs the same number of sweeps; the fused path computes
+// (and at log >= 2 prints) every per-iteration check as stock does
 static controls readControls(const dictionary& d)
 {
     controls c;
@@ -55,21 +72,17 @@ static controls readControls(const dictionary& d)
     if (lduMatrix::smoother::getName(d) != "GaussSeidel") return c;
     if (d.found("norm", keyType::LITERAL)) return c;
 
-    int log = 1;
-    scalar tolerance = lduMatrix::defaultTolerance;
-    scalar relTol = 0;
-    d.readIfPresent("log", log);
+    d.readIfPresent("log", c.log);
     d.readIfPresent("minIter", c.minIter);
     d.readIfPresent("maxIter", c.maxIter);
-    d.readIfPresent("tolerance", tolerance);
-    d.readIfPresent("relTol", relTol);
+    d.readIfPresent("tolerance", c.tolerance);
+    d.readIfPresent("relTol", c.relTol);
     c.nSweeps = d.getOrDefault<label>("nSweeps", 1);
 
     c.ok =
         c.nSweeps > 0
-     && tolerance <= 0
-     && relTol <= solverPerformance::small_
-     && log < 2
+     && c.tolerance <= 0
+     && c.relTol <= solverPerformance::small_
      && lduMatrix::debug < 2
      && solverPerformance::debug < 2;
 
@@ -159,6 +172,7 @@ Foam::fvMatrix<Foam::vector>::solveSegregated
         std::cerr << "fusedVectorSolve: " << psi.name()
             << (fused ? " fused path" : " generic path")
             << (fused && !fusedVectorSolve::stepReuseOff("gs") ? " (v3 folded copy)" : "")
+            << (fused ? " with every per-iteration residual check (v5)" : "")
             << std::endl;
     }
 
@@ -176,6 +190,23 @@ Foam::fvMatrix<Foam::vector>::solveSegregated
         PtrList<FieldField<Field, scalar>> bouC(3);
         FixedList<solverPerformance, 3> perf;
         FixedList<scalar, 3> normFactor;
+
+        // A convergence check as smoothSolver::solve makes it
+        // (SolverPerformance::checkConvergence; its log-2 line is printed in
+        // stock order with the solver performance). With these controls it
+        // cannot converge; if it ever did, the fused loop could not stop for
+        // one component as stock would, so that is an error.
+        auto checkFixed = [&](solverPerformance& sp)
+        {
+            if (sp.checkConvergence(ctl.tolerance, ctl.relTol, 0))
+            {
+                FatalErrorInFunction
+                    << sp.fieldName() << " converged with fixed-iteration"
+                       " controls (tolerance " << ctl.tolerance
+                    << ", relTol " << ctl.relTol << ")"
+                    << abort(FatalError);
+            }
+        };
 
         // --- per-component setup and initial residual, as the generic loop
         //     followed by smoothSolver::solve up to the smoothing loop
@@ -362,7 +393,110 @@ Foam::fvMatrix<Foam::vector>::solveSegregated
             perf[cmpt].initialResidual() =
                 gSumMag(residual, comm)/normFactor[cmpt];
             perf[cmpt].finalResidual() = perf[cmpt].initialResidual();
+
+            // stock: checkConvergence before the loop if minIter <= 0
+            // (its log-2 line is printed with the solver performance below)
+            if (ctl.minIter <= 0) checkFixed(perf[cmpt]);
         }
+
+        // --- residuals (lduMatrix::residual) of all three components in one
+        //     pass over the faces; interface contributions afterwards, as in
+        //     residual. Used for every per-iteration check and for the final
+        //     residual.
+        FixedList<solveScalarField, 3> rA;
+        for (direction cmpt=0; cmpt<3; cmpt++) rA[cmpt].resize(nCells);
+
+        auto residuals = [&]()
+        {
+            if (facePasses)
+            {
+                const scalar* const __restrict__ upperPtr = constMatrix.upper().begin();
+                const scalar* const __restrict__ lowerPtr = constMatrix.lower().begin();
+                const label* const __restrict__ uPtr = lduAddr().upperAddr().begin();
+                const label* const __restrict__ lPtr = lduAddr().lowerAddr().begin();
+
+                const solveScalar* const __restrict__ psi0 = psiC[0].begin();
+                const solveScalar* const __restrict__ psi1 = psiC[1].begin();
+                const solveScalar* const __restrict__ psi2 = psiC[2].begin();
+                const scalar* const __restrict__ d0 = diagC[0].begin();
+                const scalar* const __restrict__ d1 = diagC[1].begin();
+                const scalar* const __restrict__ d2 = diagC[2].begin();
+                const scalar* const __restrict__ s0 = sourceC[0].begin();
+                const scalar* const __restrict__ s1 = sourceC[1].begin();
+                const scalar* const __restrict__ s2 = sourceC[2].begin();
+                solveScalar* __restrict__ r0 = rA[0].begin();
+                solveScalar* __restrict__ r1 = rA[1].begin();
+                solveScalar* __restrict__ r2 = rA[2].begin();
+
+                for (label cell=0; cell<nCells; cell++)
+                {
+                    r0[cell] = s0[cell] - d0[cell]*psi0[cell];
+                    r1[cell] = s1[cell] - d1[cell]*psi1[cell];
+                    r2[cell] = s2[cell] - d2[cell]*psi2[cell];
+                }
+
+                for (label face=0; face<nFaces; face++)
+                {
+                    const label u = uPtr[face];
+                    const label l = lPtr[face];
+
+                    r0[u] -= lowerPtr[face]*psi0[l];
+                    r0[l] -= upperPtr[face]*psi0[u];
+                    r1[u] -= lowerPtr[face]*psi1[l];
+                    r1[l] -= upperPtr[face]*psi1[u];
+                    r2[u] -= lowerPtr[face]*psi2[l];
+                    r2[l] -= upperPtr[face]*psi2[u];
+                }
+
+                for (direction cmpt=0; cmpt<3; cmpt++)
+                {
+                    const label startRequest = UPstream::nRequests();
+
+                    initMatrixInterfaces
+                    (
+                        false,
+                        bouC[cmpt],
+                        interfaces,
+                        psiC[cmpt],
+                        rA[cmpt],
+                        cmpt
+                    );
+
+                    updateMatrixInterfaces
+                    (
+                        false,
+                        bouC[cmpt],
+                        interfaces,
+                        psiC[cmpt],
+                        rA[cmpt],
+                        cmpt,
+                        startRequest
+                    );
+                }
+            }
+            else
+            {
+                for (direction cmpt=0; cmpt<3; cmpt++)
+                {
+                    diag() = diagC[cmpt];
+                    this->lduMatrix::residual
+                    (
+                        rA[cmpt],
+                        psiC[cmpt],
+                        sourceC[cmpt],
+                        bouC[cmpt],
+                        interfaces,
+                        cmpt
+                    );
+                }
+                diag() = saveDiag;
+            }
+        };
+
+        // Per-iteration checks that stock prints at log >= 2 (iteration
+        // number, residual), kept per component and printed in component
+        // order with the solver performance, as the generic loop would
+        FixedList<std::vector<std::pair<label, scalar>>, 3> checks;
 
         // --- fused GaussSeidel sweeps (GaussSeidelSmoother::smooth for the
         //     three components in one pass over the matrix)
@@ -511,6 +645,36 @@ Foam::fvMatrix<Foam::vector>::solveSegregated
                         sweepCells(std::false_type());
                     }
                 }
+
+                // End of a smoothSolver iteration (nSweeps sweeps): its
+                // convergence check, as in stock smoothSolver::solve, i.e. the
+                // residual of each component and its global sum. The check of
+                // the last iteration is the final residual (after the loop).
+                // The checks do not touch bPrime, so the fold stays valid.
+                if ((sweep + 1) % ctl.nSweeps == 0 && sweep + 1 < nTotalSweeps)
+                {
+                    residuals();
+
+                    const label nIter = sweep + 1;
+                    for (direction cmpt=0; cmpt<3; cmpt++)
+                    {
+                        perf[cmpt].finalResidual() =
+                            gSumMag(rA[cmpt], comm)/normFactor[cmpt];
+
+                        // stock: checkConvergence (and its print) only while
+                        // nIterations < maxIter
+                        if (nIter < ctl.maxIter)
+                        {
+                            perf[cmpt].nIterations() = nIter;
+                            checkFixed(perf[cmpt]);
+                            checks[cmpt].emplace_back
+                            (
+                                nIter,
+                                perf[cmpt].finalResidual()
+                            );
+                        }
+                    }
+                }
             }
 
             for (direction cmpt=0; cmpt<3; cmpt++)
@@ -519,95 +683,9 @@ Foam::fvMatrix<Foam::vector>::solveSegregated
             }
         }
 
-        // --- final residuals (lduMatrix::residual) of all three components
-        //     in one pass over the faces; interface contributions afterwards,
-        //     as in residual
-        FixedList<solveScalarField, 3> rA;
-        for (direction cmpt=0; cmpt<3; cmpt++) rA[cmpt].resize(nCells);
-
-        if (facePasses)
-        {
-            const scalar* const __restrict__ upperPtr = constMatrix.upper().begin();
-            const scalar* const __restrict__ lowerPtr = constMatrix.lower().begin();
-            const label* const __restrict__ uPtr = lduAddr().upperAddr().begin();
-            const label* const __restrict__ lPtr = lduAddr().lowerAddr().begin();
-
-            const solveScalar* const __restrict__ psi0 = psiC[0].begin();
-            const solveScalar* const __restrict__ psi1 = psiC[1].begin();
-            const solveScalar* const __restrict__ psi2 = psiC[2].begin();
-            const scalar* const __restrict__ d0 = diagC[0].begin();
-            const scalar* const __restrict__ d1 = diagC[1].begin();
-            const scalar* const __restrict__ d2 = diagC[2].begin();
-            const scalar* const __restrict__ s0 = sourceC[0].begin();
-            const scalar* const __restrict__ s1 = sourceC[1].begin();
-            const scalar* const __restrict__ s2 = sourceC[2].begin();
-            solveScalar* __restrict__ r0 = rA[0].begin();
-            solveScalar* __restrict__ r1 = rA[1].begin();
-            solveScalar* __restrict__ r2 = rA[2].begin();
-
-            for (label cell=0; cell<nCells; cell++)
-            {
-                r0[cell] = s0[cell] - d0[cell]*psi0[cell];
-                r1[cell] = s1[cell] - d1[cell]*psi1[cell];
-                r2[cell] = s2[cell] - d2[cell]*psi2[cell];
-            }
-
-            for (label face=0; face<nFaces; face++)
-            {
-                const label u = uPtr[face];
-                const label l = lPtr[face];
-
-                r0[u] -= lowerPtr[face]*psi0[l];
-                r0[l] -= upperPtr[face]*psi0[u];
-                r1[u] -= lowerPtr[face]*psi1[l];
-                r1[l] -= upperPtr[face]*psi1[u];
-                r2[u] -= lowerPtr[face]*psi2[l];
-                r2[l] -= upperPtr[face]*psi2[u];
-            }
-
-            for (direction cmpt=0; cmpt<3; cmpt++)
-            {
-                const label startRequest = UPstream::nRequests();
-
-                initMatrixInterfaces
-                (
-                    false,
-                    bouC[cmpt],
-                    interfaces,
-                    psiC[cmpt],
-                    rA[cmpt],
-                    cmpt
-                );
-
-                updateMatrixInterfaces
-                (
-                    false,
-                    bouC[cmpt],
-                    interfaces,
-                    psiC[cmpt],
-                    rA[cmpt],
-                    cmpt,
-                    startRequest
-                );
-            }
-        }
-        else
-        {
-            for (direction cmpt=0; cmpt<3; cmpt++)
-            {
-                diag() = diagC[cmpt];
-                this->lduMatrix::residual
-                (
-                    rA[cmpt],
-                    psiC[cmpt],
-                    sourceC[cmpt],
-                    bouC[cmpt],
-                    interfaces,
-                    cmpt
-                );
-            }
-            diag() = saveDiag;
-        }
+        // --- final residuals: the check of the last iteration, which stock
+        //     computes in the loop and does not print
+        residuals();
 
         for (direction cmpt=0; cmpt<3; cmpt++)
         {
@@ -625,6 +703,31 @@ Foam::fvMatrix<Foam::vector>::solveSegregated
         // --- report and store in component order, as the generic loop
         for (direction cmpt=0; cmpt<3; cmpt++)
         {
+            // log >= 2: what smoothSolver::solve and checkConvergence print,
+            // in their format and order
+            if (ctl.log >= 2)
+            {
+                Info.masterStream(comm)
+                    << "   Normalisation factor = " << normFactor[cmpt] << endl;
+
+                // stock: checkConvergence before the loop only if minIter <= 0
+                if (ctl.minIter <= 0)
+                {
+                    Info<< perf[cmpt].solverName()
+                        << ":  Iteration " << 0
+                        << " residual = " << perf[cmpt].initialResidual()
+                        << endl;
+                }
+
+                for (const auto& chk : checks[cmpt])
+                {
+                    Info<< perf[cmpt].solverName()
+                        << ":  Iteration " << chk.first
+                        << " residual = " << chk.second
+                        << endl;
+                }
+            }
+
             if (logLevel)
             {
                 perf[cmpt].print(Info.masterStream(this->mesh().comm()));

@@ -19,6 +19,9 @@
 #   bonus_v3      shipped files unchanged, preload compactAddr:fixedIterSolvers:fusedVectorSolve:stepReuse,
 #                 STEP_REUSE_OFF=wss,fco, simpleFoamFused
 #   bonus_v3_off  bonus_v3 with STEP_REUSE_OFF=wss,fco,fixed,gcache,pcg (all hooks call the stock functions)
+#   bonus_nofix   the Bonus configuration since 2026-11-03 (every per-iteration convergence check computed): preload
+#                 compactAddr:fixedIterSolvers:stepReuse (no libfusedVectorSolve), STEP_REUSE_OFF=fixed (U, k, omega
+#                 run the stock smoothSolver::solve; the grad(p/k/omega) cache stays), simpleFoamFused
 # Checks per arm against basic: residual lines, every postProcessing file except wallClockTimeStatistics (solverInfo,
 # coefficient.dat, minMax, probes, wallShearStress), every basic log line type present (F5), report lines.
 # usage: qsub -v WORK=<new dir> identity_test.sh
@@ -46,7 +49,7 @@ mkdir -p "$WORK" && cd "$WORK"
 for l in $CALIB $FIS $FIS2 $FLIB $RLIB $SFF; do echo "sha256 $(sha256sum "$l" | cut -d' ' -f1) $l"; done
 fail=()
 
-ARMS="basic bonus_v2 bonus_v3 bonus_v3_off"
+ARMS="basic bonus_v2 bonus_v3 bonus_v3_off bonus_nofix"
 for a in $ARMS; do
     C=$WORK/$a
     bash "$T/fusedVectorSolve/test/make_box_case.sh" "$C" > /dev/null
@@ -71,6 +74,7 @@ for a in $ARMS; do
         pre=$CALIB:$FLIB:$RLIB app=$SFF ;;
     bonus_v3)     pre=$CALIB:$FIS:$FLIB:$RLIB off=wss,fco app=$SFF ;;
     bonus_v3_off) pre=$CALIB:$FIS:$FLIB:$RLIB off=wss,fco,fixed,gcache,pcg app=$SFF ;;
+    bonus_nofix)  pre=$CALIB:$FIS:$RLIB off=fixed app=$SFF ;;
     esac
     if [[ $a != bonus_v2 ]]; then
         cmp "$SHIP/fvSolution.fixedIter" "$C/system/fvSolution"
@@ -99,7 +103,7 @@ for l in open(sys.argv[1], errors='replace'):
         seen.add(l); print(l)
 PY
 }
-for a in bonus_v2 bonus_v3 bonus_v3_off; do
+for a in bonus_v2 bonus_v3 bonus_v3_off bonus_nofix; do
     for m in serial par; do
         s=$WORK/basic f=$WORK/$a; [[ $m == par ]] && s=${s}_par f=${f}_par
         r=""
@@ -141,6 +145,10 @@ need bonus_v3 'compactAddr: GaussSeidel: 16-bit neighbour offsets, folded source
 never bonus_v3 'stock solve'
 never bonus_v3_off 'cached in code'
 never bonus_v3_off 'fixed-iteration path'
+for f in k omega; do need bonus_nofix "fixedIterSolvers: smoothSolver $f: stock solve"; done
+for g in 'grad(p)' 'grad(k)' 'grad(omega)'; do need bonus_nofix "fixedIterSolvers: cache: $g cached in code"; done
+never bonus_nofix 'fixed-iteration path'
+never bonus_nofix 'fusedVectorSolve:'
 for a in bonus_v3 bonus_v3_off; do
     never $a 'stepReuse: wallShearStress: evaluated in write'
     never $a 'stepReuse: forceCoeffs: coefficient fields only with writeFields'

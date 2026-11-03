@@ -15,6 +15,9 @@
 # coefficient.dat compared), DEBUG_CACHE=1 (log solution cache use),
 # BOX_SKEW=1 (non-orthogonal box, read by make_box_case.sh).
 # Optional for the test arm: APP=<solver executable> instead of simpleFoam (e.g. simpleFoamFused).
+# Optional for both arms: U_DICT='<solver entries>' gives U its own solver dict (k and omega keep
+# theirs), e.g. with 'log 2;' to print every per-iteration check; the logs' Normalisation factor and
+# Iteration lines are then compared too.
 set -euo pipefail
 : "${WORK:?qsub -v WORK=<dir>}"
 T=/scratch/ya41/kn3896/openfoam/tools/fusedVectorSolve
@@ -29,6 +32,7 @@ mkdir -p "$WORK" && cd "$WORK"
 for l in ${FL//:/ }; do echo "library $l sha256 $(sha256sum "$l" | cut -d' ' -f1)"; done
 for v in stock fused; do
     bash "$T/test/make_box_case.sh" "$WORK/$v" > /dev/null
+    if [[ -n ${U_DICT:-} ]]; then sed -i "s/^    \"(U|k|omega)\" { \(.*\) }\$/    U { $U_DICT }\n    \"(k|omega)\" { \1 }/" "$WORK/$v/system/fvSolution"; grep -q "^    U { $U_DICT }" "$WORK/$v/system/fvSolution"; fi
     pre=""; [[ $v == fused ]] && pre=$FL
     app=simpleFoam; [[ $v == fused && -n ${APP:-} ]] && app=$APP
     [[ ${CACHE_KOMEGA:-0} == 1 ]] && echo 'cache { grad(k); grad(omega); }' >> "$WORK/$v/system/fvSolution"
@@ -58,6 +62,11 @@ for m in serial par; do
         diff -q <(cat "$s"/postProcessing/wss/*/*.dat) <(cat "$f"/postProcessing/wss/*/*.dat) > /dev/null || r="$r wss.dat"
         [[ -s "$s/20/wallShearStress" ]] || r="$r wallShearStress-missing"
     fi
-    if diff -q <(grep -E 'Solving for|continuity' "$s/log.$m") <(grep -E 'Solving for|continuity' "$f/log.$m") > /dev/null; then l=identical; else l=DIFFER; fi
+    pat='Solving for|continuity'
+    if [[ -n ${U_DICT:-} ]]; then
+        pat="$pat|Normalisation factor|:  Iteration [0-9]+ residual"
+        echo "LOG2 $m: Iteration lines stock $(grep -cE ':  Iteration [0-9]+ residual' "$s/log.$m") fused $(grep -cE ':  Iteration [0-9]+ residual' "$f/log.$m"); Normalisation lines stock $(grep -c 'Normalisation factor' "$s/log.$m") fused $(grep -c 'Normalisation factor' "$f/log.$m")"
+    fi
+    if diff -q <(grep -E "$pat" "$s/log.$m") <(grep -E "$pat" "$f/log.$m") > /dev/null; then l=identical; else l=DIFFER; fi
     echo "IDENTITY $m: fields ${r:-all identical}; solver lines $l"
 done

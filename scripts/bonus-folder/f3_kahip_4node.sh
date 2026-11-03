@@ -15,7 +15,10 @@
 # strong/eco dictionary), the bonus folder's dicts/4node, and the solver environment of its run/4node/run.sh
 # (bonus-folder build, -xCORE-AVX512; malloc and UCX settings; -fileHandler hostCollated; mpirun -np 416):
 #   base  : stock simpleFoam of that build (the change removed)
-#   bonus : simpleFoamFused + LD_PRELOAD compactAddr:fixedIterSolvers:fusedVectorSolve:stepReuse, STEP_REUSE_OFF=wss,fco
+#   bonus : simpleFoamFused + LD_PRELOAD compactAddr:fixedIterSolvers:fusedVectorSolve:stepReuse, STEP_REUSE_OFF=fixed
+#           (run.sh since 2026-11-03: every per-iteration convergence check computed: fusedVectorSolve v5 for U, k and
+#           omega on the stock smoothSolver; job 182978547 and earlier ran fusedVectorSolve v3 and the fixed-iteration
+#           path, which skip those checks, with STEP_REUSE_OFF=wss,fco)
 # Pass: coefficient.dat bit-identical (else every Cd within +-0.5%). Also solverInfo.dat and residual lines, F5 (every
 # base log line type in the bonus log), and the Cd sanity range (150 steps: 0.284-0.292, "about 0.28-0.29").
 # 1 and 2 nodes are not run: no KaHIP partitions exist for them and the user chose not to decompose.
@@ -97,9 +100,9 @@ unset I_MPI_ADJUST_ALLREDUCE I_MPI_ADJUST_ALLREDUCE_LIST I_MPI_TUNING_MODE
 export I_MPI_TUNING_BIN=$ROOT/intelmpi-allreduce-4n-104ppn-scatter.dat
 export UCX_ZCOPY_THRESH=inf UCX_RNDV_THRESH=inf
 export MALLOC_MMAP_THRESHOLD_=33554432 MALLOC_TRIM_THRESHOLD_=4294967296 MALLOC_TOP_PAD_=268435456   # run.sh line 84 since 2026-11-02
-REPO=$WM_PROJECT_DIR/../apac-hpc-openfoam
+REPO=$(cd "$WM_PROJECT_DIR/.." && pwd)/apac-hpc-openfoam   # as build.pbs/run.sh since 2026-11-03 (logical path)
 LIB=$REPO/platforms/$WM_OPTIONS/lib
-PRELOAD=$LIB/libcompactAddr.so:$LIB/libfixedIterSolvers.so:$LIB/libfusedVectorSolve.so:$LIB/libstepReuse.so
+PRELOAD=$LIB/libcompactAddr.so:$LIB/libfixedIterSolvers.so:$LIB/libfusedVectorSolve.so:$LIB/libstepReuse.so   # as run.sh since 2026-11-03
 SOLVER=$REPO/platforms/$WM_OPTIONS/bin/simpleFoamFused
 parEx="mpirun -np 416"
 fileHandler="-fileHandler hostCollated"
@@ -123,8 +126,8 @@ run() {   # $1 arm
     cd "$ROOT/case_kahip"
     echo "RUN_START arm=$a utc=$(date -u +%FT%TZ)"
     if [[ $a == bonus ]]; then
-        STEP_REUSE_OFF=wss,fco STEP_REUSE_REPORT=1 timeout --kill-after=30s 1500s \
-            $parEx -genv LD_PRELOAD "$PRELOAD" "$SOLVER" -parallel $fileHandler > "$dir/simpleFoam.log" 2>&1 || status=$?
+        STEP_REUSE_OFF=fixed STEP_REUSE_REPORT=1 FUSED_VECTOR_SOLVE_REPORT=1 timeout --kill-after=30s 1500s \
+            $parEx -genv LD_PRELOAD "$PRELOAD" -genv STEP_REUSE_OFF fixed "$SOLVER" -parallel $fileHandler > "$dir/simpleFoam.log" 2>&1 || status=$?
     else
         timeout --kill-after=30s 1500s $parEx simpleFoam -parallel $fileHandler > "$dir/simpleFoam.log" 2>&1 || status=$?
     fi
@@ -145,7 +148,8 @@ L=$ROOT/run_bonus/simpleFoam.log
 echo "== bonus report lines (master):"
 grep -hE '^(fixedIterSolvers|stepReuse|compactAddr|fusedVectorSolve|simpleFoamFused):' "$L" | sort | uniq -c
 miss=0
-for p in 'fixedIterSolvers: smoothSolver k: fixed-iteration path' 'fixedIterSolvers: smoothSolver omega: fixed-iteration path' \
+for p in 'fixedIterSolvers: smoothSolver k: stock solve' 'fixedIterSolvers: smoothSolver omega: stock solve' \
+         'fusedVectorSolve: U fused path (v3 folded copy) with every per-iteration residual check (v5)' \
          'fixedIterSolvers: cache: grad(p) cached in code' 'fixedIterSolvers: cache: grad(k) cached in code' \
          'fixedIterSolvers: cache: grad(omega) cached in code' \
          'compactAddr: GaussSeidel: 16-bit neighbour offsets' 'compactAddr: Amul: 16-bit neighbour offsets' \
@@ -153,7 +157,8 @@ for p in 'fixedIterSolvers: smoothSolver k: fixed-iteration path' 'fixedIterSolv
          'stepReuse: gaussGrad: interpolation fused' 'stepReuse: cellLimitedGrad'; do
     grep -qF "$p" "$L" || { echo "REPORT MISSING: $p"; miss=1; }
 done
-for p in 'stepReuse: wallShearStress: evaluated in write' 'stepReuse: forceCoeffs: coefficient fields only' 'stock solve'; do
+for p in 'stepReuse: wallShearStress: evaluated in write' 'stepReuse: forceCoeffs: coefficient fields only' \
+         'fixed-iteration path' 'smoothSolver Ux: stock solve'; do
     grep -qF "$p" "$L" && { echo "REPORT UNEXPECTED: $p"; miss=1; }
 done
 python3 - "$ROOT" "$miss" <<'PY'

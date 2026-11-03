@@ -4,7 +4,28 @@ Tools, solver code and job scripts from tuning `simpleFoam` on the 65M-cell
 occDrivAerStaticMesh case on NCI Gadi (Sapphire Rapids, `normalsr`), OpenFOAM v2512
 built with Intel oneAPI ICX 2025.3 and Intel MPI 2021.17.
 
-## Results: compliant with the contest addendum (2026-09-25)
+## Convergence-check ruling (organisers' email of 2026-10-23 and Slack follow-up; applied 2026-11-03)
+
+With fixed iterations the residual checks of the linear solvers can never stop them early, but skipping a check and
+its global MPI sum still counts as less work per step and is not allowed in any tier. Scored numbers must come from
+runs that compute every check; checks may be computed more cheaply as long as every check is still computed (and
+printed where stock prints it) and the result matches the run without the change. A log that only looks the same
+does not qualify: computing the check only after the last iteration is the case that is not allowed.
+
+Two parts of the Bonus build skipped checks and are no longer used in scored runs:
+
+- `fixedIterSolvers`: the fixed-iteration `smoothSolver::solve` path (residual after the last sweep only) is
+  switched off with `STEP_REUSE_OFF=fixed`; k and omega run the stock `smoothSolver`. The library stays preloaded
+  for its gradient cache.
+- `fusedVectorSolve` v3: replaced by v5, which computes every per-iteration check of the fused U solve (below).
+
+Bonus configuration since then: `simpleFoamFused`, `LD_PRELOAD`
+`libcompactAddr.so:libfixedIterSolvers.so:libfusedVectorSolve.so:libstepReuse.so`, `STEP_REUSE_OFF=fixed`.
+`scripts/final/final_runs.sh` (defaults `FIXED_ITER=0 FUSED_U=1`) and the team `run.sh` files stop if the log does
+not show the stock solve for k and omega and the v5 line of the fused U solve, or shows a path that skips checks.
+The results below were measured before the ruling, with both parts that skip checks: they are not scored results.
+
+## Results before the convergence-check ruling (not scored), compliant with the contest addendum (2026-09-25)
 
 Basic and Bonus in the same job on the same nodes (one run each), both with the shipped `fvSolution.fixedIter`,
 `fvSchemes` and `controlDict.noWrite` (only `endTime` changed, function objects as shipped). The Bonus arm adds
@@ -95,6 +116,8 @@ shipped:
   while it is up to date with its field, so results stay identical (see `stepReuse` below for the gains).
 
 `STEP_REUSE_OFF=fixed` / `gcache` switch the two parts off; `STEP_REUSE_REPORT=1` prints which path ran.
+Since the convergence-check ruling (see the top) the fixed-iteration path is not used in scored runs: they set
+`STEP_REUSE_OFF=fixed`, so only the gradient cache of this library is active (box identity arm `bonus_nofix`).
 `test/identity_test.sh` checks it on a box case with the shipped `fvSolution`, `fvSchemes`, `controlDict`
 and function objects (Basic, the v2 setup, v3, and v3 with both parts off; serial and 4 ranks).
 
@@ -139,7 +162,16 @@ so the MPI summation order is unchanged. Paired against v1 (4 nodes, 20 steps): 
 bit-identical. Measured in a 150-step final run: 1.5919 s/step (v1: 1.6066).
 
 v3 runs all sweeps as one sequence and folds the per-sweep `bPrime = source` copy into the previous
-sweep, as `tools/stepReuse` does for the scalar GaussSeidel smoother.
+sweep, as `tools/stepReuse` does for the scalar GaussSeidel smoother. Up to v3 the fused path computed the residual
+after the last sweep only, skipping the per-iteration convergence checks (not allowed since the ruling at the top).
+
+v5 (2026-11-03, current) computes every check stock `smoothSolver::solve` computes: after every group of `nSweeps`
+sweeps the residual of each component (one pass over the matrix for the three, interface update per component), its
+global sum and `SolverPerformance::checkConvergence`; before the loop the iteration-0 check. At `log 2` it prints
+the `Normalisation factor` and every `Iteration N residual = r` line in stock's format and order. Proof (job
+182994209, `scripts/fused-v5/build_test_fused_v5.sh`): with `log 2;` in the U solver dict, stock and v5 logs have the
+same Normalisation and Iteration lines (900 per 20 steps, printed to 17 digits) and identical fields, serial and 4
+ranks, for the shipped controls, `nSweeps 2`, `minIter 20 > maxIter 15`, and the full Bonus preload.
 
 `test/` holds the bit-identity check used for every change: `make_box_case.sh` builds a 3D box case
 with the same boundary types as occDrivAerStaticMesh (slip, symmetry, wall functions, kOmegaSST), and

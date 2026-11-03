@@ -14,9 +14,13 @@
 # Optional: ARMS="bonus" (default "basic bonus"); REF_CD=<Cd of a basic run> to check a bonus-only job.
 # Bonus switches (one per item put to the judges; defaults = what is switched on now):
 #   GCACHE=1      grad(p), grad(k), grad(omega) cached in code (libfixedIterSolvers; 0 -> STEP_REUSE_OFF+=gcache)
-#   FIXED_ITER=1  fixed-iteration smoothSolver path (libfixedIterSolvers) and the fused U solve (libfusedVectorSolve,
-#                 whose fused path also computes the residual after the last sweep only); 0 -> STEP_REUSE_OFF+=fixed
-#                 and libfusedVectorSolve not preloaded
+#   FIXED_ITER=0  default since 2026-11-03 (every convergence check must be computed; more cheaply is allowed):
+#                 STEP_REUSE_OFF+=fixed, k and omega on the stock smoothSolver (the log must show it). FIXED_ITER=1
+#                 (fixed-iteration smoothSolver path of libfixedIterSolvers: residual after the last sweep only)
+#                 skips those checks: not allowed in a scored run (an unscored "how fast it could go" slide only).
+#   FUSED_U=1     libfusedVectorSolve preloaded, which must be v5 (fused Ux/Uy/Uz solve computing every per-iteration
+#                 check, log-2 proof job 182994209; the log must show its v5 line); 0 -> not preloaded (U on the
+#                 stock smoothSolver). Versions up to v3 skipped the checks.
 #   Function objects always run exactly as in the stock code: the wallShearStress and forceCoeffs deferrals were
 #   removed from libstepReuse on 2026-11-03 (before that they were switched off with STEP_REUSE_OFF=wss,fco).
 # Steps (Addendum 2026-09-25, F1): the shipped controlDict.noWrite with only endTime changed
@@ -74,7 +78,8 @@ REPEATS=${REPEATS:-1}
 ARMS=${ARMS:-basic bonus}
 REF_CD=${REF_CD:-}
 GCACHE=${GCACHE:-1}
-FIXED_ITER=${FIXED_ITER:-1}
+FIXED_ITER=${FIXED_ITER:-0}
+FUSED_U=${FUSED_U:-1}
 NP=$((NNODES * 104))
 TEAM=/scratch/ya41/kn3896/openfoam/contest-results/compliance/reference   # read-only copy of the team files (the team folder moved)
 SHIP=$TEAM/run/case/occDrivAerStaticMesh
@@ -122,15 +127,15 @@ echo "== controlDict: shipped controlDict.noWrite vs run" >> compliance.txt
 diff "$SHIP/system/controlDict.noWrite" controlDict.run >> compliance.txt || true
 [[ -f $FIS && -f $FLIB && -f $RLIB && -f $CALIB && -x $SFF ]]
 for a in $ARMS; do [[ $a == basic || $a == bonus ]]; done
-for s in GCACHE FIXED_ITER; do [[ ${!s} == 0 || ${!s} == 1 ]]; done
+for s in GCACHE FIXED_ITER FUSED_U; do [[ ${!s} == 0 || ${!s} == 1 ]]; done
 # Bonus preload list and switched-off parts
 BONUS_OFF=none   # switches nothing off (no STEP_REUSE_OFF key is a substring of "none")
 [[ $GCACHE == 1 ]] || BONUS_OFF+=,gcache
 [[ $FIXED_ITER == 1 ]] || BONUS_OFF+=,fixed
-if [[ $FIXED_ITER == 1 ]]; then BONUS_PRELOAD=$CALIB:$FIS:$FLIB:$RLIB; else BONUS_PRELOAD=$CALIB:$FIS:$RLIB; fi
+if [[ $FUSED_U == 1 ]]; then BONUS_PRELOAD=$CALIB:$FIS:$FLIB:$RLIB; else BONUS_PRELOAD=$CALIB:$FIS:$RLIB; fi
 {
     echo "== bonus arm: $SFF -parallel, shipped fvSolution and run controlDict unchanged (no libs line)"
-    echo "   GCACHE=$GCACHE FIXED_ITER=$FIXED_ITER"
+    echo "   GCACHE=$GCACHE FIXED_ITER=$FIXED_ITER FUSED_U=$FUSED_U"
     echo "   LD_PRELOAD=$BONUS_PRELOAD"
     echo "   STEP_REUSE_OFF=$BONUS_OFF"
 } >> compliance.txt
@@ -241,11 +246,15 @@ run() {   # $1 arm (basic|bonus), $2 repeat
     if [[ $a == bonus ]]; then
         local log=$dir/simpleFoam.log f
         if [[ $FIXED_ITER == 1 ]]; then
-            grep -q 'fusedVectorSolve: U fused path (v3 folded copy)' "$log"
             for f in k omega; do grep -qF "fixedIterSolvers: smoothSolver $f: fixed-iteration path" "$log"; done
-            absent 'stock solve' "$log"
         else
             for f in k omega; do grep -qF "fixedIterSolvers: smoothSolver $f: stock solve" "$log"; done
+            absent 'fixed-iteration path' "$log"
+        fi
+        if [[ $FUSED_U == 1 ]]; then
+            grep -qF 'fusedVectorSolve: U fused path (v3 folded copy) with every per-iteration residual check (v5)' "$log"
+            [[ $(grep -c 'fusedVectorSolve: U fused path' "$log") == $(grep -c 'per-iteration residual check (v5)' "$log") ]]
+        else
             absent 'fusedVectorSolve: U fused path' "$log"
         fi
         if [[ $GCACHE == 1 ]]; then
@@ -274,7 +283,7 @@ run() {   # $1 arm (basic|bonus), $2 repeat
 for ((r = 1; r <= REPEATS; r++)); do for a in $ARMS; do run $a $r; done; done
 cmp "$CASE/system/controlDict" controlDict.run   # case restored
 
-python3 - "$ROOT" "$NNODES" "$STEPS" "$REPEATS" "$ARMS" "$REF_CD" "GCACHE=$GCACHE FIXED_ITER=$FIXED_ITER STEP_REUSE_OFF=$BONUS_OFF" <<'PY'
+python3 - "$ROOT" "$NNODES" "$STEPS" "$REPEATS" "$ARMS" "$REF_CD" "GCACHE=$GCACHE FIXED_ITER=$FIXED_ITER FUSED_U=$FUSED_U STEP_REUSE_OFF=$BONUS_OFF" <<'PY'
 import re, sys
 from pathlib import Path
 root, nn, steps, reps = Path(sys.argv[1]), sys.argv[2], sys.argv[3], int(sys.argv[4])
@@ -293,8 +302,11 @@ def types(a, r):   # line types (numbers -> #) without the application line (sim
 both = 'basic' in arms and 'bonus' in arms
 out = [f'# Final runs, {nn} node(s) x 104 ranks, occDrivAerStaticMesh 65M, {steps} steps, {reps} repeat(s), arms: {" ".join(arms)}', '',
        'basic = Basic tier (simpleFoam, shipped fvSolution and controlDict). bonus = simpleFoamFused + LD_PRELOAD compactAddr : fixedIterSolvers'
-       ' (fixed-iteration smoothSolver path, grad(p), grad(k), grad(omega) cached in code) : fusedVectorSolve : stepReuse, with the same shipped'
-       f' fvSolution and controlDict; bonus switches: {switches}. Arms interleaved on the same nodes.', '',
+       + (' (fixed-iteration smoothSolver path, grad(p), grad(k), grad(omega) cached in code)'
+          if 'FIXED_ITER=1' in switches else
+          ' (grad(p), grad(k), grad(omega) cached in code; solver path off: k and omega on the stock smoothSolver)')
+       + (' : fusedVectorSolve v5 (every per-iteration check computed)' if 'FUSED_U=1' in switches else '') + ' : stepReuse' +
+       f', with the same shipped fvSolution and controlDict; bonus switches: {switches}. Arms interleaved on the same nodes.', '',
        '| Repeat | ' + ' | '.join(f'{a} s/step' for a in arms) + (' | bonus vs basic' if both else '') + ' | ' + ' | '.join(f'Cd {a} (step {steps})' for a in arms) + ' | Cd check |',
        '|---:|' + '---:|' * (len(arms) * 2 + (1 if both else 0)) + ':---|']
 checks, ok = [], True
